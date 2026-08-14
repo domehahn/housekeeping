@@ -1,0 +1,39 @@
+version: "2"
+
+# Prioritizes correctness, error handling, context usage, unused code,
+# complexity, and security - not "enable everything". A smaller, well
+# understood linter set that the team actually reads findings from beats a
+# maximal one nobody trusts.
+linters:
+  default: none
+  enable:
+    - errcheck # unchecked errors are a correctness bug in a tool that does destructive I/O
+    - govet
+    - ineffassign
+    - unused
+    - staticcheck
+    - gosec # security-relevant issues (this tool authenticates, deletes, blocks accounts)
+    - bodyclose # unclosed HTTP response bodies
+    - contextcheck # context.Context propagation
+    - noctx # HTTP calls must carry a context
+    - gocyclo # keep functions small and reviewable
+    - misspell
+
+  settings:
+    gocyclo:
+      min-complexity: 20
+    gosec:
+      excludes:
+        - G104 # duplicate of errcheck
+
+  exclusions:
+    rules:
+      # Table-driven tests legitimately have higher cyclomatic complexity.
+      - path: _test\.go
+        linters:
+          - gocyclo
+
+formatters:
+  enable:
+    - gofmt
+    - goimports

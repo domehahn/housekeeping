@@ -1,0 +1,60 @@
+# Example CI pipeline. scm-cleaner is provider-independent, but this
+# project's own source happens to be developed on GitLab.
+
+stages:
+  - check
+  - test
+  - build
+
+variables:
+  GOPATH: "$CI_PROJECT_DIR/.go"
+  GOFLAGS: "-mod=mod"
+
+default:
+  image: golang:1.24
+  cache:
+    key: go-mod-cache
+    paths:
+      - .go/pkg/mod/
+
+format-check:
+  stage: check
+  script:
+    - test -z "$(gofmt -l .)" || (gofmt -l . && exit 1)
+
+vet:
+  stage: check
+  script:
+    - go vet ./...
+
+lint:
+  stage: check
+  image: golangci/golangci-lint:latest
+  script:
+    - golangci-lint run
+
+test:
+  stage: test
+  script:
+    - go test ./...
+
+race-test:
+  stage: test
+  script:
+    - go test -race ./...
+
+build:
+  stage: build
+  script:
+    - go build ./...
+  artifacts:
+    paths:
+      - bin/
+    expire_in: 1 week
+
+# Optional: dependency vulnerability scanning.
+security-scan:
+  stage: check
+  allow_failure: true
+  script:
+    - go run golang.org/x/vuln/cmd/govulncheck@latest ./...

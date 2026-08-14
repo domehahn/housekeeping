@@ -1,0 +1,113 @@
+# Example scm-cleaner configuration.
+#
+# Configuration precedence (lowest to highest):
+#   built-in defaults < this file < environment variables < CLI flags
+#
+# The access token is never stored here - only the name of the
+# environment variable that holds it (token_env). Set that variable
+# before running scm-cleaner, e.g.:
+#
+#   export GITLAB_TOKEN=glpat-xxxxxxxxxxxxxxxxxxxx
+
+version: 1
+
+provider:
+  type: gitlab
+
+  gitlab:
+    base_url: https://gitlab.example.com
+    token_env: GITLAB_TOKEN
+    # insecure_skip_tls_verify: false  # DANGEROUS - only for isolated test instances
+
+scope:
+  group: engineering
+  recursive: true
+
+# --- Project cleanup policy -------------------------------------------
+
+projects:
+  inactive:
+    enabled: true
+    days: 90
+
+  archived:
+    enabled: false
+
+  include:
+    - "^sandbox-.*"
+    - "^test-.*"
+
+  exclude:
+    - "^production$"
+    - "^infrastructure$"
+
+  protection:
+    paths:
+      - engineering/production
+      - engineering/terraform-state
+    regex:
+      - ".*/production$"
+      - ".*/terraform-state$"
+
+# --- User cleanup policy ------------------------------------------------
+
+users:
+  inactive:
+    enabled: true
+    last_login_days: 30
+    last_activity_days: 30
+    match: all # all = both criteria must hold; any = either is enough
+
+    # Opt-in: overrides "active elsewhere protects you" for users who are
+    # billable in THIS group but hold no Developer+ membership in any
+    # OTHER group on the instance - avoids paying for an unused seat here
+    # just because the user is a free Guest/Reporter somewhere else.
+    # Requires Owner on this top-level group + an instance-admin token.
+    # Disabled by default - see docs/adr/0004-billable-seat-override.md.
+    ignore_global_activity_if_non_billable_elsewhere: false
+    billable_access_level_threshold: developer
+
+  # unknown data (the provider could not determine a user's activity) is
+  # never silently treated as "inactive". skip = never match; warn = never
+  # match but flag it; match = treat unknown as a match (dangerous, must
+  # be set explicitly).
+  unknown_activity: skip
+
+  exclude_current_user: true
+
+  protection:
+    usernames:
+      - root
+      - administrator
+    regex:
+      - "^svc-"
+      - "^bot-"
+    access_levels:
+      - owner
+
+# --- Safety guards -------------------------------------------------------
+
+safety:
+  max_actions:
+    projects: 10
+    users: 20
+
+  max_percentage:
+    projects: 20
+    users: 10
+
+# --- Execution behavior ---------------------------------------------------
+
+execution:
+  # Re-check each resource's current state immediately before acting on
+  # it, skipping the action if the resource is no longer in the state
+  # that justified it (e.g. the user has since logged in again).
+  revalidate: true
+  # Continue processing remaining actions after an individual failure
+  # instead of aborting the whole run.
+  fail_fast: false
+
+performance:
+  workers: 5
+
+output: table
