@@ -1,18 +1,46 @@
 package cli
 
 import (
+	"strings"
+
 	"github.com/spf13/cobra"
 
 	"github.com/domehahn/housekeeping/internal/output"
+	"github.com/domehahn/housekeeping/internal/providerfactory"
 )
 
 func newProviderCmd(e *env) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "provider",
-		Short: "Inspect the configured provider",
+		Short: "Inspect available and configured providers",
 	}
-	cmd.AddCommand(newProviderInfoCmd(e), newProviderCapabilitiesCmd(e))
+	cmd.AddCommand(newProviderListCmd(e), newProviderInfoCmd(e), newProviderCapabilitiesCmd(e))
 	return cmd
+}
+
+// newProviderListCmd is deliberately config-independent: it needs no
+// base_url, no token, and performs no network call. It exists so a
+// first-time user can see which providers this build supports (and what
+// each one requires) before configuring anything - unlike `provider info`
+// and `provider capabilities`, which report *live* data from a connected
+// instance and therefore genuinely need working credentials.
+func newProviderListCmd(e *env) *cobra.Command {
+	return &cobra.Command{
+		Use:   "list",
+		Short: "List supported provider types and what each requires (no configuration needed)",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			registry := providerfactory.Registry()
+			rows := make([][]string, 0, len(registry))
+			for _, d := range registry {
+				rows = append(rows, []string{d.Type, d.Status, d.Description, strings.Join(d.RequiredConfig, "; ")})
+			}
+			table := output.Table{
+				Headers: []string{"Type", "Status", "Description", "Required Configuration"},
+				Rows:    rows,
+			}
+			return output.Render(cmd.OutOrStdout(), e.format, table, registry)
+		},
+	}
 }
 
 func newProviderInfoCmd(e *env) *cobra.Command {

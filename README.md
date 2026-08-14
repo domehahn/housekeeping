@@ -58,6 +58,14 @@ that directory is on your `PATH`).
 Cross-compiled binaries for linux/darwin/windows (amd64+arm64) via
 `make build-all`.
 
+**Note on `scm-cleaner version` output**: both `go install` and a plain
+`go build ./...` produce a binary that reports
+`dev (commit none, built unknown)` - `pkg/version` is only stamped with a
+real version/commit/date when built with the `-ldflags` `make build`
+(or `make build-all`) already sets. This is expected, not a broken build;
+see the `LDFLAGS` variable in the `Makefile` if you want a manually
+built binary to report a specific version too.
+
 ## 5. Quick start
 
 ```bash
@@ -112,8 +120,9 @@ scm-cleaner --config myconfig.yaml config validate
 
 ```
 scm-cleaner version
-scm-cleaner provider info
-scm-cleaner provider capabilities
+scm-cleaner provider list            # static, no config/credentials needed
+scm-cleaner provider info            # live: needs a working connection
+scm-cleaner provider capabilities    # live: needs a working connection
 scm-cleaner projects list
 scm-cleaner projects evaluate
 scm-cleaner projects plan
@@ -129,6 +138,17 @@ Every command accepts `--output table|json|yaml` (default `table`).
 `table` output never contains ANSI color codes, so it is safe piped
 through other tools, redirected to a file, or read in CI logs; `NO_COLOR`
 is trivially respected because no color is ever emitted.
+
+**`provider list` vs. `provider info`/`capabilities`**: `provider list` is
+purely static - it needs no `base_url`, no token, and makes no network
+call, so it works before you've configured anything (useful to check what
+this build supports). `provider info` and `provider capabilities`
+genuinely need a working connection: they report *live* facts (the
+authenticated identity, the connected server's version, what your actual
+credentials can do right now) that cannot exist without one, so they
+validate the full provider configuration first and fail with an
+actionable message (e.g. "set `--gitlab-url` or `provider.gitlab.base_url`")
+if it's incomplete.
 
 ## 9. Dry run
 

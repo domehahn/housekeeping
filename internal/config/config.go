@@ -176,15 +176,20 @@ func (c Config) Validate() error {
 	switch c.Provider.Type {
 	case "gitlab":
 		if c.Provider.GitLab.BaseURL == "" {
-			return fmt.Errorf("config: provider.gitlab.base_url is required")
+			return fmt.Errorf("config: provider.gitlab.base_url is required to connect to a GitLab instance " +
+				"(set it in the config file, via --gitlab-url, or run a command that doesn't need a live " +
+				"connection, e.g. `scm-cleaner provider list`)")
 		}
 		if c.Provider.GitLab.TokenEnv == "" {
-			return fmt.Errorf("config: provider.gitlab.token_env is required")
+			return fmt.Errorf("config: provider.gitlab.token_env is required and must name the environment " +
+				"variable holding your GitLab access token (set it in the config file or via --token-env, " +
+				"e.g. token_env: GITLAB_TOKEN, then `export GITLAB_TOKEN=...`)")
 		}
 	case "":
-		return fmt.Errorf("config: provider.type is required")
+		return fmt.Errorf("config: provider.type is required (currently supported: gitlab)")
 	default:
-		return fmt.Errorf("config: unknown provider.type %q (supported: gitlab)", c.Provider.Type)
+		return fmt.Errorf("config: unknown provider.type %q (currently supported: gitlab; run "+
+			"`scm-cleaner provider list` to see what this build supports)", c.Provider.Type)
 	}
 
 	if c.Projects.Inactive.Enabled && c.Projects.Inactive.Days < 0 {
