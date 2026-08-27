@@ -240,20 +240,32 @@ Documented exit codes:
 
 - **Dry run by default**, **explicit `--apply`**, **plan before execute**
   (see [ADR 0002](docs/adr/0002-plan-before-execute.md)).
-- **Max actions**: `safety.max_actions.projects` / `.users` (default 10 /
-  20). A plan exceeding the configured maximum is refused (exit code 5)
-  unless an explicit `--max-actions` override is passed on that specific
-  command.
-- **Max percentage**: `safety.max_percentage.projects` / `.users` (0 =
-  disabled) refuses a plan that would touch too large a fraction of the
-  discovered total.
+- **Max actions**: `safety.max_actions.projects` / `.users` /
+  `.pipeline_tags` / `.runner_tags` (defaults 10 / 20 / 10 / 5). A plan
+  exceeding the configured maximum is refused (exit code 5) unless an
+  explicit `--max-actions` override is passed on that specific command. A
+  resource type with no configured limit at all fails **closed** (blocks
+  every action of that type) rather than allowing unlimited actions.
+- **Max percentage**: `safety.max_percentage.projects` / `.users` /
+  `.pipeline_tags` / `.runner_tags` (0 = disabled) refuses a plan that
+  would touch too large a fraction of the discovered total. Only enforced
+  at plan time (a plan file doesn't carry the discovered total needed to
+  recheck it at execute time - the max-actions guard *is* re-checked then).
 - **Protected resources**: explicit paths/usernames, regex patterns, and
   (for users) protected access levels (e.g. always protect Owners) and
   automatic protection of the token's own identity
   (`exclude_current_user: true`).
+- **Out-of-scope impact confirmation** (`runners` only): `execute --apply`
+  refuses to touch a shared runner used by projects outside the evaluated
+  scope unless `--confirm-out-of-scope-impact=<N>` matches the plan's
+  total exactly, in both interactive and non-interactive contexts - see
+  [§25](#25-runner-tag-cleanup) and
+  [ADR 0005](docs/adr/0005-ci-tag-management-scope.md).
 - **Plan integrity**: SHA-256 hash + provider/instance verification (see
   above).
-- **Revalidation** before each destructive call.
+- **Revalidation** before each destructive call - for pipeline/runner tag
+  actions this is structural: the live file/tag-list is always re-fetched
+  immediately before acting, so a stale plan can never apply a stale diff.
 - **Unknown activity is never a match by default** (see below).
 
 ## 13. Project cleanup

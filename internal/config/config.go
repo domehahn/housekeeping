@@ -171,12 +171,28 @@ var validAccessLevels = map[string]bool{
 
 // Validate checks internal consistency of the configuration: known
 // provider types, valid regexes, non-negative limits, and valid enum
-// values. It never performs network I/O.
+// values. It never performs network I/O. Each section is validated by its
+// own helper so this stays a simple checklist rather than one large
+// function.
 func (c Config) Validate() error {
 	if c.Version != 1 {
 		return fmt.Errorf("config: unsupported version %d (expected 1)", c.Version)
 	}
+	for _, fn := range []func() error{
+		c.validateProvider,
+		c.validateProjects,
+		c.validateUsers,
+		c.validateSafety,
+		c.validatePerformanceAndOutput,
+	} {
+		if err := fn(); err != nil {
+			return err
+		}
+	}
+	return nil
+}
 
+func (c Config) validateProvider() error {
 	switch c.Provider.Type {
 	case "gitlab":
 		if c.Provider.GitLab.BaseURL == "" {
@@ -189,13 +205,16 @@ func (c Config) Validate() error {
 				"variable holding your GitLab access token (set it in the config file or via --token-env, " +
 				"e.g. token_env: GITLAB_TOKEN, then `export GITLAB_TOKEN=...`)")
 		}
+		return nil
 	case "":
 		return fmt.Errorf("config: provider.type is required (currently supported: gitlab)")
 	default:
 		return fmt.Errorf("config: unknown provider.type %q (currently supported: gitlab; run "+
 			"`scm-cleaner provider list` to see what this build supports)", c.Provider.Type)
 	}
+}
 
+func (c Config) validateProjects() error {
 	if c.Projects.Inactive.Enabled && c.Projects.Inactive.Days < 0 {
 		return fmt.Errorf("config: projects.inactive.days must not be negative")
 	}
@@ -209,14 +228,15 @@ func (c Config) Validate() error {
 			return fmt.Errorf("config: projects.protection.regex: %w", err)
 		}
 	}
+	return nil
+}
 
+func (c Config) validateUsers() error {
 	if err := validateMatch(c.Users.Inactive.Match); err != nil {
 		return fmt.Errorf("config: users.inactive.match: %w", err)
 	}
-	if c.Users.Inactive.Enabled {
-		if c.Users.Inactive.LastLoginDays < 0 || c.Users.Inactive.LastActivityDays < 0 {
-			return fmt.Errorf("config: users.inactive day thresholds must not be negative")
-		}
+	if c.Users.Inactive.Enabled && (c.Users.Inactive.LastLoginDays < 0 || c.Users.Inactive.LastActivityDays < 0) {
+		return fmt.Errorf("config: users.inactive day thresholds must not be negative")
 	}
 	switch c.Users.UnknownActivity {
 	case "skip", "warn", "match", "":
@@ -236,7 +256,10 @@ func (c Config) Validate() error {
 	if c.Users.Inactive.BillableAccessLevelThreshold != "" && !validAccessLevels[c.Users.Inactive.BillableAccessLevelThreshold] {
 		return fmt.Errorf("config: users.inactive.billable_access_level_threshold contains unknown level %q", c.Users.Inactive.BillableAccessLevelThreshold)
 	}
+	return nil
+}
 
+func (c Config) validateSafety() error {
 	if c.Safety.MaxActions.Projects < 0 || c.Safety.MaxActions.Users < 0 ||
 		c.Safety.MaxActions.PipelineTags < 0 || c.Safety.MaxActions.RunnerTags < 0 {
 		return fmt.Errorf("config: safety.max_actions values must not be negative")
@@ -249,18 +272,19 @@ func (c Config) Validate() error {
 			return fmt.Errorf("config: safety.max_percentage.%s must be between 0 and 100", name)
 		}
 	}
+	return nil
+}
 
+func (c Config) validatePerformanceAndOutput() error {
 	if c.Performance.Workers < 0 {
 		return fmt.Errorf("config: performance.workers must not be negative")
 	}
-
 	switch c.Output {
 	case "table", "json", "yaml", "":
+		return nil
 	default:
 		return fmt.Errorf("config: output must be one of table|json|yaml, got %q", c.Output)
 	}
-
-	return nil
 }
 
 func validateMatch(m string) error {

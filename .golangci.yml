@@ -32,6 +32,11 @@ linters:
       - path: _test\.go
         linters:
           - gocyclo
+      # Test fixtures read/write files under t.TempDir() with paths this
+      # process itself constructed - not attacker-controlled input.
+      - path: _test\.go
+        linters:
+          - gosec
 
 formatters:
   enable:

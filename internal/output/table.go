@@ -24,19 +24,27 @@ func RenderTable(w io.Writer, t Table) error {
 	tw := tabwriter.NewWriter(w, 0, 2, 2, ' ', 0)
 
 	if len(t.Headers) > 0 {
-		fmt.Fprintln(tw, joinRow(t.Headers))
+		if _, err := fmt.Fprintln(tw, joinRow(t.Headers)); err != nil {
+			return err
+		}
 	}
 	for _, row := range t.Rows {
-		fmt.Fprintln(tw, joinRow(row))
+		if _, err := fmt.Fprintln(tw, joinRow(row)); err != nil {
+			return err
+		}
 	}
 	if err := tw.Flush(); err != nil {
 		return err
 	}
 	if len(t.Rows) == 0 {
-		fmt.Fprintln(w, "(no results)")
+		if _, err := fmt.Fprintln(w, "(no results)"); err != nil {
+			return err
+		}
 	}
 	if t.Footer != "" {
-		fmt.Fprintln(w, t.Footer)
+		if _, err := fmt.Fprintln(w, t.Footer); err != nil {
+			return err
+		}
 	}
 	return nil
 }

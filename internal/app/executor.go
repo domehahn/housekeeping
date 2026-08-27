@@ -147,74 +147,90 @@ func executeOne(ctx context.Context, client Executor, action domain.PlannedActio
 func revalidate(ctx context.Context, client Executor, action domain.PlannedAction, opts ExecuteOptions) (skip bool, detail string) {
 	switch action.ResourceType {
 	case domain.ResourceTypeProject:
-		proj, err := client.GetProject(ctx, action.ResourceID)
-		if err != nil {
-			var pErr *provider.Error
-			if errors.As(err, &pErr) && pErr.Kind == provider.KindNotFound {
-				return false, "" // let performAction observe the 404 and report already-done
-			}
-			return true, "revalidation failed, skipping to be safe: " + err.Error()
-		}
-		if activityChangedSince(proj.LastActivityAt, action.EvaluatedAt) {
-			return true, fmt.Sprintf("project has had activity since it was planned (%s)", proj.LastActivityAt.At.Format("2006-01-02"))
-		}
-		if proj.FullPath != action.ResourceName {
-			return true, fmt.Sprintf("project path changed since planning (%q -> %q)", action.ResourceName, proj.FullPath)
-		}
-		if opts.ProjectProtection != nil {
-			if protected, reason := opts.ProjectProtection.IsProtected(proj); protected {
-				return true, reason
-			}
-		}
-		return false, ""
-
+		return revalidateProject(ctx, client, action, opts)
 	case domain.ResourceTypeUser:
-		u, err := client.GetUser(ctx, action.ResourceID)
-		if err != nil {
-			var pErr *provider.Error
-			if errors.As(err, &pErr) && pErr.Kind == provider.KindNotFound {
-				return false, ""
-			}
-			return true, "revalidation failed, skipping to be safe: " + err.Error()
-		}
-		if activityChangedSince(u.LastLoginAt, action.EvaluatedAt) || activityChangedSince(u.LastActivityAt, action.EvaluatedAt) {
-			return true, "user has had login or activity since the plan was created"
-		}
-		if u.Username != action.ResourceName {
-			return true, fmt.Sprintf("username changed since planning (%q -> %q)", action.ResourceName, u.Username)
-		}
-		if action.GroupID != "" {
-			membership, err := client.GetGroupMember(ctx, action.GroupID, action.ResourceID)
-			if err != nil {
-				var pErr *provider.Error
-				if errors.As(err, &pErr) && pErr.Kind == provider.KindNotFound {
-					if action.Action == domain.ActionRemoveGroupMember {
-						return false, "" // let removal report the membership as already gone
-					}
-					return true, "target is no longer a direct member of the planned group"
-				}
-				return true, "membership revalidation failed, skipping to be safe: " + err.Error()
-			}
-			u.AccessLevel = membership.AccessLevel
-			u.GroupID = membership.GroupID
-			u.MembershipOrigin = membership.MembershipOrigin
-			if membership.MembershipOrigin != domain.MembershipDirect {
-				return true, "membership is no longer confirmed as direct"
-			}
-			if action.AccessLevel != "" && membership.AccessLevel != action.AccessLevel {
-				return true, fmt.Sprintf("access level changed since planning (%q -> %q)", action.AccessLevel, membership.AccessLevel)
-			}
-		}
-		if opts.UserProtection != nil {
-			if protected, reason := opts.UserProtection.IsProtected(u); protected {
-				return true, reason
-			}
-		}
-		return false, ""
-
+		return revalidateUser(ctx, client, action, opts)
 	default:
 		return false, ""
 	}
+}
+
+func revalidateProject(ctx context.Context, client Executor, action domain.PlannedAction, opts ExecuteOptions) (skip bool, detail string) {
+	proj, err := client.GetProject(ctx, action.ResourceID)
+	if err != nil {
+		var pErr *provider.Error
+		if errors.As(err, &pErr) && pErr.Kind == provider.KindNotFound {
+			return false, "" // let performAction observe the 404 and report already-done
+		}
+		return true, "revalidation failed, skipping to be safe: " + err.Error()
+	}
+	if activityChangedSince(proj.LastActivityAt, action.EvaluatedAt) {
+		return true, fmt.Sprintf("project has had activity since it was planned (%s)", proj.LastActivityAt.At.Format("2006-01-02"))
+	}
+	if proj.FullPath != action.ResourceName {
+		return true, fmt.Sprintf("project path changed since planning (%q -> %q)", action.ResourceName, proj.FullPath)
+	}
+	if opts.ProjectProtection != nil {
+		if protected, reason := opts.ProjectProtection.IsProtected(proj); protected {
+			return true, reason
+		}
+	}
+	return false, ""
+}
+
+func revalidateUser(ctx context.Context, client Executor, action domain.PlannedAction, opts ExecuteOptions) (skip bool, detail string) {
+	u, err := client.GetUser(ctx, action.ResourceID)
+	if err != nil {
+		var pErr *provider.Error
+		if errors.As(err, &pErr) && pErr.Kind == provider.KindNotFound {
+			return false, ""
+		}
+		return true, "revalidation failed, skipping to be safe: " + err.Error()
+	}
+	if activityChangedSince(u.LastLoginAt, action.EvaluatedAt) || activityChangedSince(u.LastActivityAt, action.EvaluatedAt) {
+		return true, "user has had login or activity since the plan was created"
+	}
+	if u.Username != action.ResourceName {
+		return true, fmt.Sprintf("username changed since planning (%q -> %q)", action.ResourceName, u.Username)
+	}
+	if action.GroupID != "" {
+		if skip, detail := revalidateUserMembership(ctx, client, action, &u); skip {
+			return true, detail
+		}
+	}
+	if opts.UserProtection != nil {
+		if protected, reason := opts.UserProtection.IsProtected(u); protected {
+			return true, reason
+		}
+	}
+	return false, ""
+}
+
+// revalidateUserMembership re-fetches a user's direct membership in the
+// planned group, updating u in place with the live values so protection
+// checks afterward see current data.
+func revalidateUserMembership(ctx context.Context, client Executor, action domain.PlannedAction, u *domain.User) (skip bool, detail string) {
+	membership, err := client.GetGroupMember(ctx, action.GroupID, action.ResourceID)
+	if err != nil {
+		var pErr *provider.Error
+		if errors.As(err, &pErr) && pErr.Kind == provider.KindNotFound {
+			if action.Action == domain.ActionRemoveGroupMember {
+				return false, "" // let removal report the membership as already gone
+			}
+			return true, "target is no longer a direct member of the planned group"
+		}
+		return true, "membership revalidation failed, skipping to be safe: " + err.Error()
+	}
+	u.AccessLevel = membership.AccessLevel
+	u.GroupID = membership.GroupID
+	u.MembershipOrigin = membership.MembershipOrigin
+	if membership.MembershipOrigin != domain.MembershipDirect {
+		return true, "membership is no longer confirmed as direct"
+	}
+	if action.AccessLevel != "" && membership.AccessLevel != action.AccessLevel {
+		return true, fmt.Sprintf("access level changed since planning (%q -> %q)", action.AccessLevel, membership.AccessLevel)
+	}
+	return false, ""
 }
 
 // activityChangedSince reports whether ts represents a known, non-nil point

@@ -20,7 +20,7 @@ type Logger struct {
 // file at path. Permissions are restricted to the owner since an audit log
 // can reveal which users/projects were targeted.
 func NewLogger(path string) (*Logger, error) {
-	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600) //nolint:gosec // path is the operator's own --audit-log CLI argument, not attacker-controlled input
 	if err != nil {
 		return nil, fmt.Errorf("audit: open log %s: %w", path, err)
 	}

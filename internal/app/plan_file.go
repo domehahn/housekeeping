@@ -33,7 +33,7 @@ func SavePlan(path string, plan domain.Plan) error {
 // I/O and does not by itself check the plan against a live provider
 // instance - see VerifyAgainstInstance for that.
 func LoadPlan(path string) (domain.Plan, error) {
-	data, err := os.ReadFile(path)
+	data, err := os.ReadFile(path) //nolint:gosec // path is the operator's own plan-file CLI argument, not attacker-controlled input
 	if err != nil {
 		return domain.Plan{}, fmt.Errorf("read plan file %s: %w", path, err)
 	}
@@ -73,62 +73,89 @@ func LoadPlan(path string) (domain.Plan, error) {
 	return plan, nil
 }
 
+// validatePlannedAction checks one action's shape against what its
+// resource type/action combination requires. Each resource type has its
+// own small helper so this stays a dispatch table rather than one large
+// function.
 func validatePlannedAction(a domain.PlannedAction) error {
 	if a.ResourceID == "" || a.ResourceName == "" || a.EvaluatedAt.IsZero() {
 		return fmt.Errorf("resource ID, resource name, and evaluatedAt are required")
 	}
 	switch a.ResourceType {
 	case domain.ResourceTypeProject:
-		if a.GroupID != "" || a.AccessLevel != "" {
-			return fmt.Errorf("project action must not contain user membership metadata")
-		}
-		switch a.Action {
-		case domain.ActionReport, domain.ActionDeleteProject, domain.ActionArchiveProject:
-			return nil
-		}
+		return validateProjectAction(a)
 	case domain.ResourceTypeUser:
-		switch a.Action {
-		case domain.ActionReport, domain.ActionBlockUser:
-			return nil
-		case domain.ActionRemoveGroupMember:
-			if a.GroupID == "" || a.AccessLevel == "" || a.AccessLevel == domain.AccessLevelUnknown {
-				return fmt.Errorf("remove-from-group requires groupId and a known accessLevel")
-			}
-			return nil
-		}
+		return validateUserAction(a)
 	case domain.ResourceTypePipelineConfig:
-		if a.GroupID != "" || a.AccessLevel != "" {
-			return fmt.Errorf("pipeline_config action must not contain user membership metadata")
-		}
-		switch a.Action {
-		case domain.ActionReport:
-			return nil
-		case domain.ActionAddPipelineTag:
-			if a.TagValue == "" {
-				return fmt.Errorf("add-pipeline-tag requires a tagValue")
-			}
-			return nil
-		}
+		return validatePipelineConfigAction(a)
 	case domain.ResourceTypeRunner:
-		if a.GroupID != "" || a.AccessLevel != "" {
-			return fmt.Errorf("runner action must not contain user membership metadata")
-		}
-		switch a.Action {
-		case domain.ActionReport:
-			return nil
-		case domain.ActionAddRunnerTag:
-			if a.TagValue == "" {
-				return fmt.Errorf("add-runner-tag requires a tagValue")
-			}
-			if a.OutOfScopeProjectCount != len(a.OutOfScopeProjectPaths) {
-				return fmt.Errorf("outOfScopeProjectCount must match the number of outOfScopeProjectPaths")
-			}
-			return nil
-		}
+		return validateRunnerAction(a)
 	default:
 		return fmt.Errorf("unsupported resource type %q", a.ResourceType)
 	}
-	return fmt.Errorf("action %q is invalid for resource type %q", a.Action, a.ResourceType)
+}
+
+func validateProjectAction(a domain.PlannedAction) error {
+	if a.GroupID != "" || a.AccessLevel != "" {
+		return fmt.Errorf("project action must not contain user membership metadata")
+	}
+	switch a.Action {
+	case domain.ActionReport, domain.ActionDeleteProject, domain.ActionArchiveProject:
+		return nil
+	default:
+		return fmt.Errorf("action %q is invalid for resource type %q", a.Action, a.ResourceType)
+	}
+}
+
+func validateUserAction(a domain.PlannedAction) error {
+	switch a.Action {
+	case domain.ActionReport, domain.ActionBlockUser:
+		return nil
+	case domain.ActionRemoveGroupMember:
+		if a.GroupID == "" || a.AccessLevel == "" || a.AccessLevel == domain.AccessLevelUnknown {
+			return fmt.Errorf("remove-from-group requires groupId and a known accessLevel")
+		}
+		return nil
+	default:
+		return fmt.Errorf("action %q is invalid for resource type %q", a.Action, a.ResourceType)
+	}
+}
+
+func validatePipelineConfigAction(a domain.PlannedAction) error {
+	if a.GroupID != "" || a.AccessLevel != "" {
+		return fmt.Errorf("pipeline_config action must not contain user membership metadata")
+	}
+	switch a.Action {
+	case domain.ActionReport:
+		return nil
+	case domain.ActionAddPipelineTag:
+		if a.TagValue == "" {
+			return fmt.Errorf("add-pipeline-tag requires a tagValue")
+		}
+		return nil
+	default:
+		return fmt.Errorf("action %q is invalid for resource type %q", a.Action, a.ResourceType)
+	}
+}
+
+func validateRunnerAction(a domain.PlannedAction) error {
+	if a.GroupID != "" || a.AccessLevel != "" {
+		return fmt.Errorf("runner action must not contain user membership metadata")
+	}
+	switch a.Action {
+	case domain.ActionReport:
+		return nil
+	case domain.ActionAddRunnerTag:
+		if a.TagValue == "" {
+			return fmt.Errorf("add-runner-tag requires a tagValue")
+		}
+		if a.OutOfScopeProjectCount != len(a.OutOfScopeProjectPaths) {
+			return fmt.Errorf("outOfScopeProjectCount must match the number of outOfScopeProjectPaths")
+		}
+		return nil
+	default:
+		return fmt.Errorf("action %q is invalid for resource type %q", a.Action, a.ResourceType)
+	}
 }
 
 // VerifyAgainstInstance guards against a plan created for one provider

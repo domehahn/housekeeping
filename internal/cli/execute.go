@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bufio"
+	"context"
 	"fmt"
 	"os"
 	"strings"
@@ -14,12 +15,20 @@ import (
 	"github.com/domehahn/housekeeping/internal/output"
 	projectpolicy "github.com/domehahn/housekeeping/internal/policy/project"
 	userpolicy "github.com/domehahn/housekeeping/internal/policy/user"
+	"github.com/domehahn/housekeeping/internal/provider"
 )
 
+// executeFlags holds every flag `execute` accepts.
+type executeFlags struct {
+	apply                     bool
+	nonInteractive            bool
+	confirmScope              string
+	maxActions, maxPercentage int
+	confirmOutOfScopeImpact   int
+}
+
 func newExecuteCmd(e *env) *cobra.Command {
-	var apply, nonInteractive bool
-	var confirmScope string
-	var maxActions, maxPercentage, confirmOutOfScopeImpactFlag int
+	flags := &executeFlags{}
 
 	cmd := &cobra.Command{
 		Use:   "execute <plan-file>",
@@ -37,117 +46,132 @@ context (--non-interactive, or stdin is not a TTY) you must additionally
 pass --confirm-scope matching the plan's scope path, as an extra guard
 against unattended misfires (e.g. a misconfigured CI job).`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			planPath := args[0]
-			plan, err := app.LoadPlan(planPath)
-			if err != nil {
-				return exitErr(ExitPlanValidationFailed, err)
-			}
-
-			client, err := e.requireClient()
-			if err != nil {
-				return err
-			}
-			ctx := cmd.Context()
-			info, err := client.Info(ctx)
-			if err != nil {
-				return wrapProviderErr(err)
-			}
-			if err := app.VerifyAgainstInstance(plan, info.Provider, info.Instance); err != nil {
-				return exitErr(ExitPlanValidationFailed, err)
-			}
-
-			limits := resolveSafetyLimits(e, maxActions, maxPercentage, resourceMajority(plan))
-			// The percentage guard needs a "discovered" total that a plan
-			// file alone does not carry (that check already ran, against
-			// the real total, when the plan was created) - so it is
-			// deliberately disabled here and only the absolute max-actions
-			// guard, which needs no discovered count, is re-checked.
-			for rt, l := range limits.Limits {
-				l.MaxPercentage = 0
-				limits.Limits[rt] = l
-			}
-			if violations := app.CheckGuards(plan, nil, limits); len(violations) > 0 {
-				for _, v := range violations {
-					cmd.PrintErrln("SAFETY GUARD:", v.Error())
-				}
-				return exitErr(ExitSafetyGuardTriggered, fmt.Errorf("plan exceeds configured maximum action count"))
-			}
-
-			if apply {
-				if outOfScope := totalOutOfScopeImpact(plan); outOfScope > 0 {
-					if err := confirmOutOfScopeImpact(cmd, plan, outOfScope, confirmOutOfScopeImpactFlag); err != nil {
-						return err
-					}
-				}
-				if err := confirmApply(cmd, plan, nonInteractive, confirmScope); err != nil {
-					return err
-				}
-			} else {
-				cmd.Println("Dry run: no changes will be made. Pass --apply to execute for real.")
-			}
-
-			auditLog, err := e.auditWriter()
-			if err != nil {
-				return err
-			}
-
-			projectProtection, err := projectpolicy.NewProtection(e.cfg.Projects.Protection.Paths, e.cfg.Projects.Protection.Regex)
-			if err != nil {
-				_ = auditLog.Close()
-				return exitErr(ExitInvalidConfiguration, err)
-			}
-			userProtection, err := userpolicy.NewProtection(
-				e.cfg.Users.Protection.Usernames,
-				e.cfg.Users.Protection.Regex,
-				e.cfg.Users.Protection.AccessLevels,
-				"", // app.Execute independently resolves and always protects the caller.
-			)
-			if err != nil {
-				_ = auditLog.Close()
-				return exitErr(ExitInvalidConfiguration, err)
-			}
-
-			summary := app.Execute(ctx, client, plan, app.ExecuteOptions{
-				Apply:             apply,
-				Revalidate:        e.cfg.Execution.Revalidate,
-				FailFast:          e.cfg.Execution.FailFast,
-				ProjectProtection: projectProtection,
-				UserProtection:    userProtection,
-			})
-
-			for _, o := range summary.Outcomes {
-				rec := audit.FromOutcome(e.clock.Now(), plan.Provider, plan.Instance, plan.Scope.Path, o)
-				if err := auditLog.Write(rec); err != nil {
-					_ = auditLog.Close()
-					return exitErr(ExitGeneralError, err)
-				}
-			}
-			if err := auditLog.Close(); err != nil {
-				return exitErr(ExitGeneralError, fmt.Errorf("close audit log: %w", err))
-			}
-
-			if err := renderExecutionSummary(cmd, e, summary); err != nil {
-				return err
-			}
-
-			if summary.AllFailed() {
-				return exitErr(ExitGeneralError, fmt.Errorf("all %d action(s) failed", len(summary.Outcomes)))
-			}
-			if summary.Partial() {
-				return exitErr(ExitPartialExecution, fmt.Errorf("execution completed with %d failure(s) out of %d action(s)", summary.CountByResult(domain.ResultFailed), len(summary.Outcomes)))
-			}
-			return nil
+			return runExecute(cmd, e, args[0], flags)
 		},
 	}
 
-	cmd.Flags().BoolVar(&apply, "apply", false, "actually perform the planned actions (default is a dry run)")
-	cmd.Flags().BoolVar(&nonInteractive, "non-interactive", false, "never prompt; requires --confirm-scope when combined with --apply")
-	cmd.Flags().StringVar(&confirmScope, "confirm-scope", "", "must equal the plan's scope path; required for --apply --non-interactive")
-	cmd.Flags().IntVar(&maxActions, "max-actions", 0, "override the safety.max_actions guard for this run's resource type (must be explicit)")
-	cmd.Flags().IntVar(&maxPercentage, "max-percentage", 0, "override the safety.max_percentage guard for this run's resource type (must be explicit)")
-	cmd.Flags().IntVar(&confirmOutOfScopeImpactFlag, "confirm-out-of-scope-impact", 0,
+	cmd.Flags().BoolVar(&flags.apply, "apply", false, "actually perform the planned actions (default is a dry run)")
+	cmd.Flags().BoolVar(&flags.nonInteractive, "non-interactive", false, "never prompt; requires --confirm-scope when combined with --apply")
+	cmd.Flags().StringVar(&flags.confirmScope, "confirm-scope", "", "must equal the plan's scope path; required for --apply --non-interactive")
+	cmd.Flags().IntVar(&flags.maxActions, "max-actions", 0, "override the safety.max_actions guard for this run's resource type (must be explicit)")
+	cmd.Flags().IntVar(&flags.maxPercentage, "max-percentage", 0, "override the safety.max_percentage guard for this run's resource type (must be explicit)")
+	cmd.Flags().IntVar(&flags.confirmOutOfScopeImpact, "confirm-out-of-scope-impact", 0,
 		"required, and must exactly equal the plan's total out-of-scope project impact, when the plan contains any runner-tag action affecting a shared runner used outside the evaluated scope")
 	return cmd
+}
+
+func runExecute(cmd *cobra.Command, e *env, planPath string, flags *executeFlags) error {
+	plan, err := app.LoadPlan(planPath)
+	if err != nil {
+		return exitErr(ExitPlanValidationFailed, err)
+	}
+
+	client, err := e.requireClient()
+	if err != nil {
+		return err
+	}
+	ctx := cmd.Context()
+	info, err := client.Info(ctx)
+	if err != nil {
+		return wrapProviderErr(err)
+	}
+	if err := app.VerifyAgainstInstance(plan, info.Provider, info.Instance); err != nil {
+		return exitErr(ExitPlanValidationFailed, err)
+	}
+
+	if err := checkExecuteSafetyGuards(cmd, e, plan, flags); err != nil {
+		return err
+	}
+
+	if flags.apply {
+		if outOfScope := totalOutOfScopeImpact(plan); outOfScope > 0 {
+			if err := confirmOutOfScopeImpact(cmd, plan, outOfScope, flags.confirmOutOfScopeImpact); err != nil {
+				return err
+			}
+		}
+		if err := confirmApply(cmd, plan, flags.nonInteractive, flags.confirmScope); err != nil {
+			return err
+		}
+	} else {
+		cmd.Println("Dry run: no changes will be made. Pass --apply to execute for real.")
+	}
+
+	return runAndReportExecution(cmd, e, ctx, client, plan, flags.apply)
+}
+
+// checkExecuteSafetyGuards re-checks the absolute max-actions guard
+// against the plan's own action counts. The percentage guard needs a
+// "discovered" total that a plan file alone does not carry (that check
+// already ran, against the real total, when the plan was created), so it
+// is deliberately disabled here.
+func checkExecuteSafetyGuards(cmd *cobra.Command, e *env, plan domain.Plan, flags *executeFlags) error {
+	limits := resolveSafetyLimits(e, flags.maxActions, flags.maxPercentage, resourceMajority(plan))
+	for rt, l := range limits.Limits {
+		l.MaxPercentage = 0
+		limits.Limits[rt] = l
+	}
+	violations := app.CheckGuards(plan, nil, limits)
+	if len(violations) == 0 {
+		return nil
+	}
+	for _, v := range violations {
+		cmd.PrintErrln("SAFETY GUARD:", v.Error())
+	}
+	return exitErr(ExitSafetyGuardTriggered, fmt.Errorf("plan exceeds configured maximum action count"))
+}
+
+func runAndReportExecution(cmd *cobra.Command, e *env, ctx context.Context, client provider.Client, plan domain.Plan, apply bool) error {
+	auditLog, err := e.auditWriter()
+	if err != nil {
+		return err
+	}
+
+	projectProtection, err := projectpolicy.NewProtection(e.cfg.Projects.Protection.Paths, e.cfg.Projects.Protection.Regex)
+	if err != nil {
+		_ = auditLog.Close()
+		return exitErr(ExitInvalidConfiguration, err)
+	}
+	userProtection, err := userpolicy.NewProtection(
+		e.cfg.Users.Protection.Usernames,
+		e.cfg.Users.Protection.Regex,
+		e.cfg.Users.Protection.AccessLevels,
+		"", // app.Execute independently resolves and always protects the caller.
+	)
+	if err != nil {
+		_ = auditLog.Close()
+		return exitErr(ExitInvalidConfiguration, err)
+	}
+
+	summary := app.Execute(ctx, client, plan, app.ExecuteOptions{
+		Apply:             apply,
+		Revalidate:        e.cfg.Execution.Revalidate,
+		FailFast:          e.cfg.Execution.FailFast,
+		ProjectProtection: projectProtection,
+		UserProtection:    userProtection,
+	})
+
+	for _, o := range summary.Outcomes {
+		rec := audit.FromOutcome(e.clock.Now(), plan.Provider, plan.Instance, plan.Scope.Path, o)
+		if err := auditLog.Write(rec); err != nil {
+			_ = auditLog.Close()
+			return exitErr(ExitGeneralError, err)
+		}
+	}
+	if err := auditLog.Close(); err != nil {
+		return exitErr(ExitGeneralError, fmt.Errorf("close audit log: %w", err))
+	}
+
+	if err := renderExecutionSummary(cmd, e, summary); err != nil {
+		return err
+	}
+
+	if summary.AllFailed() {
+		return exitErr(ExitGeneralError, fmt.Errorf("all %d action(s) failed", len(summary.Outcomes)))
+	}
+	if summary.Partial() {
+		return exitErr(ExitPartialExecution, fmt.Errorf("execution completed with %d failure(s) out of %d action(s)", summary.CountByResult(domain.ResultFailed), len(summary.Outcomes)))
+	}
+	return nil
 }
 
 // resourceMajority picks which resource type a plan-level --max-actions/

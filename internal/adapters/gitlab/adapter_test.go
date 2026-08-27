@@ -189,15 +189,15 @@ func TestListProjects_ActivityAlwaysKnown(t *testing.T) {
 func TestListSubGroups_RecursiveWalkAndDedup(t *testing.T) {
 	// Tree: root(1) -> [child(2), child(3)]; child(2) -> [grandchild(4)]
 	a := newTestAdapter(t, func(w http.ResponseWriter, r *http.Request) {
-		switch {
-		case r.URL.Path == "/api/v4/groups/g":
+		switch r.URL.Path {
+		case "/api/v4/groups/g":
 			writeJSON(t, w, map[string]any{"id": 1, "name": "root", "path": "g", "full_path": "g"})
-		case r.URL.Path == "/api/v4/groups/1/subgroups":
+		case "/api/v4/groups/1/subgroups":
 			writeJSON(t, w, []map[string]any{
 				{"id": 2, "name": "child2", "path": "child2", "full_path": "g/child2", "parent_id": 1},
 				{"id": 3, "name": "child3", "path": "child3", "full_path": "g/child3", "parent_id": 1},
 			})
-		case r.URL.Path == "/api/v4/groups/2/subgroups":
+		case "/api/v4/groups/2/subgroups":
 			writeJSON(t, w, []map[string]any{
 				{"id": 4, "name": "grandchild", "path": "gc", "full_path": "g/child2/gc", "parent_id": 2},
 			})
@@ -261,14 +261,14 @@ func TestListGroupMembers_DirectOnlyAndDedup(t *testing.T) {
 
 func TestListGroupMembers_AdminEnrichesActivity(t *testing.T) {
 	a := newTestAdapter(t, func(w http.ResponseWriter, r *http.Request) {
-		switch {
-		case r.URL.Path == "/api/v4/groups/1/members":
+		switch r.URL.Path {
+		case "/api/v4/groups/1/members":
 			writeJSON(t, w, []map[string]any{
 				{"id": 10, "username": "alice", "name": "Alice", "state": "active", "access_level": 30},
 			})
-		case r.URL.Path == "/api/v4/user":
+		case "/api/v4/user":
 			writeJSON(t, w, map[string]any{"id": 999, "username": "admin", "is_admin": true})
-		case r.URL.Path == "/api/v4/users/10":
+		case "/api/v4/users/10":
 			writeJSON(t, w, map[string]any{
 				"id": 10, "username": "alice", "state": "active",
 				"last_sign_in_at":  "2026-01-01T00:00:00Z",
