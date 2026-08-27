@@ -138,7 +138,8 @@ Orchestrates ports + policies for each use case:
 ### CLI (`internal/cli`)
 
 Cobra command tree. Responsible for flag parsing, merging configuration
-(file < environment < flags), building the provider client via
+(defaults < file < flags; secret values are resolved from their named
+environment variable), building the provider client via
 `internal/providerfactory`, rendering output (`internal/output`), writing
 the audit log (`internal/audit`), and mapping errors to documented exit
 codes. Contains no business logic - every command is "gather inputs, call
@@ -199,8 +200,8 @@ See [ADR 0002](adr/0002-plan-before-execute.md).
   override exists for license-cost-aware cleanup - see
   [ADR 0004](adr/0004-billable-seat-override.md).
 - **Revalidation** - `execution.revalidate: true` (default) re-checks a
-  resource immediately before acting and skips it if it is no longer in
-  the state that justified the action.
+  resource, its direct membership role, identity/path, current protection
+  rules, and the authenticated caller immediately before acting.
 - **Idempotency** - a resource that is already gone (404) is reported as
   `skipped_already_done`, not as a failure.
 - **Partial-failure tolerance** - one failing action does not, by default,
@@ -237,6 +238,29 @@ the order they were discovered) is kept for planning purposes. This is a
 deliberate simplification, documented in code
 (`internal/adapters/gitlab/users.go`) and in the README limitations
 section.
+
+## CI Tag Management
+
+Two more resource types exist alongside project/user cleanup:
+`pipeline_config` (adding a CI tag to a project's `.gitlab-ci.yml`, via a
+Merge Request) and `runner` (adding a CI tag to a runner's `tag_list`,
+which can affect projects outside the evaluated scope if the runner is
+shared). Both use the exact same discover -> evaluate -> plan -> review ->
+execute pipeline and the same `domain.Plan`/`PlannedAction` shape as
+project/user cleanup - see `internal/app/pipeline_tags.go`,
+`internal/app/runner_tags.go`, and the `pipelines`/`runners` CLI commands.
+
+The actual `.gitlab-ci.yml` patch algorithm lives in its own
+provider-independent package, `internal/ciyaml`, tested the same way
+`internal/policy` is (pure functions, table-driven, no network) even
+though the feature as a whole is GitLab-flavored - `.gitlab-ci.yml`'s
+shape is not something another provider shares, but the patching logic
+itself needs no I/O or GitLab API knowledge, so keeping it a pure package
+kept it independently testable and kept the adapter thin (it only handles
+fetching the file and opening the Merge Request). See
+[ADR 0005](adr/0005-ci-tag-management-scope.md) for the full scope
+decisions (what gets patched, what's deliberately left alone, why runner
+tag changes require an extra confirmation).
 
 ## Provider Extension
 

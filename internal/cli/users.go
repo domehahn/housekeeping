@@ -117,8 +117,9 @@ func newUsersPlanCmd(e *env) *cobra.Command {
 			matched := summary.Matched()
 			plan := app.BuildUserPlan(info.Provider, info.Instance, scope, matched, action, e.clock)
 
-			limits := resolveSafetyLimits(e, maxActions, maxPercentage, false)
-			if violations := app.CheckGuards(plan, 0, summary.Discovered(), limits); len(violations) > 0 {
+			limits := resolveSafetyLimits(e, maxActions, maxPercentage, domain.ResourceTypeUser)
+			discovered := map[domain.ResourceType]int{domain.ResourceTypeUser: summary.Discovered()}
+			if violations := app.CheckGuards(plan, discovered, limits); len(violations) > 0 {
 				for _, v := range violations {
 					cmd.PrintErrln("SAFETY GUARD:", v.Error())
 				}
@@ -178,9 +179,11 @@ func runUserEvaluation(cmd *cobra.Command, e *env, client provider.Client, flags
 
 	currentUserID := ""
 	if e.cfg.Users.ExcludeCurrentUser {
-		if me, err := client.CurrentUser(ctx); err == nil {
-			currentUserID = me.ID
+		me, err := client.CurrentUser(ctx)
+		if err != nil {
+			return app.UserEvaluationSummary{}, domain.Scope{}, wrapProviderErr(fmt.Errorf("resolve current user for self-protection: %w", err))
 		}
+		currentUserID = me.ID
 	}
 	protection, err := user.NewProtection(
 		e.cfg.Users.Protection.Usernames,
@@ -242,6 +245,14 @@ func buildBillableSeatOverride(e *env, flags *userFlags) (user.BillableSeatOverr
 }
 
 func buildUserPolicy(e *env, flags *userFlags) (domain.UserPolicy, error) {
+	enabled := e.cfg.Users.Inactive.Enabled
+	if flags.inactiveFor != "" || flags.lastLoginBefore != "" || flags.lastActivityBefore != "" {
+		enabled = true
+	}
+	if !enabled {
+		return nil, fmt.Errorf("no user policy enabled: set --inactive-for, --last-login-before/--last-activity-before, or users.inactive.enabled")
+	}
+
 	onUnknown, err := user.ParseUnknownBehavior(e.cfg.Users.UnknownActivity)
 	if err != nil {
 		return nil, err

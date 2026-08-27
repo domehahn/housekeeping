@@ -32,6 +32,8 @@ type Capabilities struct {
 	ProjectLastActivity Support
 	BillableMembers     Support
 	UserMemberships     Support
+	ProposePipelineTags Support
+	UpdateRunnerTags    Support
 }
 
 // Info describes the connected provider instance and identity, surfaced by

@@ -70,6 +70,8 @@ func newRootCmd() (*cobra.Command, *env) {
 		newProviderCmd(e),
 		newProjectsCmd(e),
 		newUsersCmd(e),
+		newPipelinesCmd(e),
+		newRunnersCmd(e),
 		newExecuteCmd(e),
 		newConfigCmd(e),
 		newDoctorCmd(e),

@@ -68,8 +68,9 @@ an attacker with write access to wherever the plan is stored) between
 `plan` and `execute` to add or change targets.
 
 **Mitigations**:
-- Every saved plan carries a SHA-256 hash over its canonical content;
-  `LoadPlan` recomputes and compares it, refusing to execute a plan whose
+- Every saved plan must carry a SHA-256 hash over its canonical content;
+  `LoadPlan` rejects a missing hash, recomputes and compares a present one,
+  and refuses to execute a plan whose
   content does not match its recorded hash.
 - This is a **tamper/accidental-change detector, not a cryptographic
   signature** - anyone who can edit the plan file can also recompute a
@@ -123,9 +124,10 @@ is nothing to clean up."
 a project gets active development) between planning and execution.
 
 **Mitigations**:
-- `execution.revalidate: true` (default) re-fetches each resource
-  immediately before acting and skips it (`skipped_revalidate`) if its
-  activity now post-dates when the plan was created.
+- `execution.revalidate: true` (default) re-fetches each resource and direct
+  membership immediately before acting. It skips (`skipped_revalidate`) on
+  new activity, identity/path changes, membership-role changes, current
+  protection-rule matches, or when the target is the authenticated caller.
 - If revalidation itself fails (e.g. a transient error), the action is
   skipped, not carried out - "safety over convenience": an action is never
   performed on unconfirmed information.
@@ -172,6 +174,46 @@ error output.
   message/status (`safeMessage`), never from request headers.
 - Audit log records (`internal/audit/record.go`) contain only resource
   identifiers, action, result, and scope - never credentials.
+
+### 11. A proposed CI configuration change breaks a pipeline
+
+**Risk**: an automated `.gitlab-ci.yml` edit (adding a CI tag) is
+malformed, or interacts badly with a project's actual pipeline semantics
+(e.g. `extends:`, includes, anchors), breaking CI for that project.
+
+**Mitigations**:
+- The patch (`internal/ciyaml`) never commits directly - it always opens a
+  Merge Request. Nothing in this tool merges it; a human reviews the real
+  diff in GitLab's own MR view before it takes effect.
+- The patch logic only ever adds a tag to a `tags:` list; it never removes
+  or reorders existing content, and is proven idempotent and
+  comment/formatting-preserving by its own unit tests
+  (`internal/ciyaml/patch_test.go`).
+- A document that fails to parse, or whose `default`/job `tags:` value is
+  not a list, is reported as a `parse_error` and skipped - never patched
+  on a best-effort guess.
+- Jobs reachable only through `include:` are never touched; this is
+  reported as an explicit warning rather than silently missed.
+
+### 12. A shared runner tag change affects unrelated projects
+
+**Risk**: changing a runner's `tag_list` to route new work to it also
+changes routing for every other project/group already using that runner,
+if it is shared.
+
+**Mitigations**:
+- Every runner report shows the full blast radius - every project using
+  the runner, split into in-scope and out-of-scope
+  (`domain.Runner.OutOfScopeProjectPaths`) - before any action is taken.
+- `execute --apply` refuses to run a plan touching a shared runner used
+  outside the evaluated scope unless
+  `--confirm-out-of-scope-impact=<N>` is passed and matches the plan's
+  total out-of-scope project count exactly, in both interactive and
+  non-interactive contexts. See
+  [ADR 0005](adr/0005-ci-tag-management-scope.md).
+- The Runner API replaces `tag_list` wholesale; this tool always re-reads
+  the current list immediately before writing the union with the desired
+  tag, rather than trusting a stale precomputed list.
 
 ## Explicitly Out of Scope (for now)
 

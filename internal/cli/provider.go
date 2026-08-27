@@ -102,6 +102,8 @@ func newProviderCapabilitiesCmd(e *env) *cobra.Command {
 					{"Project Last Activity", string(caps.ProjectLastActivity)},
 					{"Billable Group Members", string(caps.BillableMembers)},
 					{"Cross-Instance User Memberships", string(caps.UserMemberships)},
+					{"Propose Pipeline Tag (Merge Request)", string(caps.ProposePipelineTags)},
+					{"Update Runner Tags", string(caps.UpdateRunnerTags)},
 				},
 			}
 			return output.Render(cmd.OutOrStdout(), e.format, table, caps)

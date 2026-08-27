@@ -22,33 +22,38 @@ func formatTimestamp(ts domain.Timestamp, clock domain.Clock) string {
 	return fmt.Sprintf("%dd ago (%s)", days, ts.At.Format("2006-01-02"))
 }
 
-// resolveSafetyLimits builds the full SafetyLimits from config, applying a
-// CLI --max-actions/--max-percentage override to only the resource type
-// the current command targets. An override must be a positive, explicit
-// value - 0 means "not overridden", never "no limit".
-func resolveSafetyLimits(e *env, maxActionsOverride, maxPercentageOverride int, isProjects bool) app.SafetyLimits {
+// resolveSafetyLimits builds the full SafetyLimits from config for every
+// resource type, applying a CLI --max-actions/--max-percentage override
+// to only the resource type the current command targets. An override must
+// be a positive, explicit value - 0 means "not overridden", never "no
+// limit".
+func resolveSafetyLimits(e *env, maxActionsOverride, maxPercentageOverride int, target domain.ResourceType) app.SafetyLimits {
 	limits := app.SafetyLimits{
-		MaxActionsProjects:    e.cfg.Safety.MaxActions.Projects,
-		MaxActionsUsers:       e.cfg.Safety.MaxActions.Users,
-		MaxPercentageProjects: e.cfg.Safety.MaxPercentage.Projects,
-		MaxPercentageUsers:    e.cfg.Safety.MaxPercentage.Users,
+		Limits: map[domain.ResourceType]app.ResourceLimit{
+			domain.ResourceTypeProject: {
+				MaxActions: e.cfg.Safety.MaxActions.Projects, MaxPercentage: e.cfg.Safety.MaxPercentage.Projects,
+			},
+			domain.ResourceTypeUser: {
+				MaxActions: e.cfg.Safety.MaxActions.Users, MaxPercentage: e.cfg.Safety.MaxPercentage.Users,
+			},
+			domain.ResourceTypePipelineConfig: {
+				MaxActions: e.cfg.Safety.MaxActions.PipelineTags, MaxPercentage: e.cfg.Safety.MaxPercentage.PipelineTags,
+			},
+			domain.ResourceTypeRunner: {
+				MaxActions: e.cfg.Safety.MaxActions.RunnerTags, MaxPercentage: e.cfg.Safety.MaxPercentage.RunnerTags,
+			},
+		},
 	}
-	if isProjects {
+	if maxActionsOverride > 0 || maxPercentageOverride > 0 {
+		l := limits.Limits[target]
 		if maxActionsOverride > 0 {
-			limits.MaxActionsProjects = maxActionsOverride
+			l.MaxActions = maxActionsOverride
 			limits.MaxActionsOverridden = true
 		}
 		if maxPercentageOverride > 0 {
-			limits.MaxPercentageProjects = maxPercentageOverride
+			l.MaxPercentage = maxPercentageOverride
 		}
-		return limits
-	}
-	if maxActionsOverride > 0 {
-		limits.MaxActionsUsers = maxActionsOverride
-		limits.MaxActionsOverridden = true
-	}
-	if maxPercentageOverride > 0 {
-		limits.MaxPercentageUsers = maxPercentageOverride
+		limits.Limits[target] = l
 	}
 	return limits
 }

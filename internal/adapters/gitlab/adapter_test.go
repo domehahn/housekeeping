@@ -77,6 +77,24 @@ func TestAuthentication_TokenHeaderSent(t *testing.T) {
 	}
 }
 
+func TestGetGroupMember_MapsDirectRole(t *testing.T) {
+	a := newTestAdapter(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v4/groups/10/members/42" {
+			t.Fatalf("unexpected path %s", r.URL.Path)
+		}
+		writeJSON(t, w, map[string]any{
+			"id": 42, "username": "alice", "name": "Alice", "state": "active", "access_level": 50,
+		})
+	})
+	member, err := a.GetGroupMember(context.Background(), "10", "42")
+	if err != nil {
+		t.Fatalf("GetGroupMember: %v", err)
+	}
+	if member.GroupID != "10" || member.MembershipOrigin != domain.MembershipDirect || member.AccessLevel != domain.AccessLevelOwner {
+		t.Fatalf("unexpected mapped membership: %+v", member)
+	}
+}
+
 func TestErrorClassification(t *testing.T) {
 	tests := []struct {
 		status   int

@@ -106,9 +106,10 @@ for a complete, commented example and
 [`examples/policies.yaml`](examples/policies.yaml) for just the
 policy-relevant block.
 
-**Precedence** (lowest to highest): built-in defaults < config file <
-environment variables < CLI flags. A `--group` flag always overrides
-`scope.group` in the file, for example.
+**Precedence** (lowest to highest): built-in defaults < config file < CLI
+flags. A `--group` flag always overrides `scope.group` in the file, for
+example. Secret token values are resolved separately from the environment
+variable named by `token_env`; `SCM_CLEANER_DEBUG` only controls logging.
 
 Validate a configuration without connecting to anything:
 
@@ -129,6 +130,12 @@ scm-cleaner projects plan
 scm-cleaner users list
 scm-cleaner users evaluate
 scm-cleaner users plan
+scm-cleaner pipelines list
+scm-cleaner pipelines evaluate
+scm-cleaner pipelines plan
+scm-cleaner runners list
+scm-cleaner runners evaluate
+scm-cleaner runners plan
 scm-cleaner execute <plan-file>
 scm-cleaner config validate
 scm-cleaner doctor
@@ -165,7 +172,7 @@ resource as a side effect of discovery, evaluation, or planning; only
 
 ```json
 {
-  "version": 1,
+  "version": 2,
   "provider": "gitlab",
   "instance": "https://gitlab.example.com",
   "scope": { "type": "group", "id": "123", "path": "company/sandbox", "recursive": true },
@@ -185,8 +192,8 @@ resource as a side effect of discovery, evaluation, or planning; only
 ```
 
 - Resource identity is always a stable ID, never only a name.
-- `hash` is a SHA-256 fingerprint over the plan's canonical content,
-  checked on load to detect tampering or accidental edits (see
+- `hash` is a required SHA-256 fingerprint over the plan's canonical
+  content, checked on load to detect tampering or accidental edits (see
   [ADR 0002](docs/adr/0002-plan-before-execute.md) and the threat model).
 - `version`/`provider`/`instance` are checked by `execute` before anything
   runs.
@@ -210,8 +217,9 @@ scm-cleaner execute plan.json --apply --non-interactive --confirm-scope company/
 ```
 
 Each action is (by default, `execution.revalidate: true`) re-checked
-immediately before it runs and skipped if the resource's state has since
-improved. Already-gone resources are reported as `skipped_already_done`,
+immediately before it runs. New activity, renamed resources, changed direct
+membership roles, newly matching protection rules, and attempts to modify the
+authenticated caller are skipped. Already-gone resources are reported as `skipped_already_done`,
 not as failures. One failing action does not abort the rest of the run
 unless `execution.fail_fast: true`.
 
@@ -360,13 +368,15 @@ visible. See [ADR 0003](docs/adr/0003-unknown-activity-safe-default.md).
 |---|---|
 | List projects/groups/subgroups | Any token with read access to the group |
 | List direct group members | Any token with read access to the group |
-| Remove a direct group member | Typically Owner (or Maintainer, depending on target role) on that specific group |
+| Remove a direct group member | **Owner** on that specific group (a personal access token with `api` scope is sufficient - "Manage group members" is an Owner-only permission for groups, unlike for projects) |
 | Delete / archive a project | Typically Owner on that project/namespace |
 | Read `last_sign_in_at` / `last_activity_on` for other users | **Instance administrator** |
 | Block a user | **Instance administrator** |
 | Delete a user account | **Instance administrator** - not implemented in this tool, see below |
 | List billable members of a group (`--ignore-global-activity-if-non-billable-elsewhere`) | **Owner on that specific top-level group**; does not work on subgroups |
 | List a user's memberships instance-wide (same feature) | **Instance administrator** |
+| Open a Merge Request proposing a `.gitlab-ci.yml` tag change | At least **Developer** on the project (to push a branch and open a Merge Request) |
+| Update a runner's tags | **Maintainer+** on a project the runner is enabled for, or **Owner** on the runner's owning group for a shared runner |
 
 `scm-cleaner provider capabilities` reports what is actually available
 given the current token, and `scm-cleaner doctor` runs a full read-only
@@ -439,17 +449,45 @@ make integration-test   # opt-in, see below
 
 - **Policy/domain tests** use `domain.FixedClock` for deterministic
   boundary testing (e.g. exactly 30 days vs. 29 vs. 31 days ago).
+- **`internal/ciyaml` tests** are pure, no-I/O table-driven tests covering
+  the full `.gitlab-ci.yml` patch scope: default-block creation/append,
+  per-job tag append vs. jobs left alone, hidden template jobs,
+  anchors/aliases, reserved keywords, `include:` detection, and full
+  idempotency (a second call is byte-identical to the first).
 - **GitLab adapter tests** run entirely against `httptest.Server` - no
   test in `internal/adapters/gitlab` touches the network. They cover
   authentication headers, pagination across multiple pages, subgroup
   recursion and de-duplication, direct-vs-admin-enriched member activity,
-  nil/unknown activity mapping, delete/remove operations, and
-  401/403/404/429/500 error classification.
+  nil/unknown activity mapping, delete/remove operations,
+  401/403/404/429/500 error classification, the branch/commit/Merge
+  Request sequence for pipeline tag proposals, and runner listing/tag
+  updates with blast-radius mapping.
 - **Integration tests** (`test/integration/gitlab`) are skipped unless
   `GITLAB_INTEGRATION_TEST=true`, `GITLAB_URL`, and `GITLAB_TOKEN` are all
   set. Destructive scenarios additionally require
   `GITLAB_INTEGRATION_ALLOW_DESTRUCTIVE=true` and are deliberately **not
   implemented** in this suite - see the file for rationale.
+
+### Tagged GitLab runners
+
+The repository pipeline provides an opt-in `.runner-tagged` template. A job
+can select a tagged runner without hard-coding the installation-specific tag:
+
+```yaml
+my-job:
+  extends: .runner-tagged
+  script: make test
+```
+
+Set `SCM_CLEANER_RUNNER_TAG` as a project or group CI/CD variable (the example
+default is `docker`). For multiple required tags, copy the template's `tags`
+array into the job and add one entry per tag. These are GitLab CI **job tags**,
+which select a compatible runner. A runner's own tag list is administered via
+GitLab's Runner API and can affect every project assigned to that runner - this
+repository's own pipeline does not mutate runner registrations for itself, but
+`scm-cleaner` can do exactly this *for other groups/projects* as a deliberate,
+guarded feature (see [§24](#24-pipeline-tag-cleanup) and
+[§25](#25-runner-tag-cleanup)).
 
 ## 22. Security considerations
 
@@ -499,6 +537,11 @@ Highlights:
 - **Plan-time percentage guard is not re-evaluated at execute time**
   against a fresh discovered total (a plan file does not carry that
   count); the absolute max-actions guard *is* re-checked at execute time.
+- **Pipeline tag patching only covers `default: tags:` and jobs that
+  already define their own `tags:` list.** A job with no `tags:` of its
+  own is left alone by design, and jobs defined only via `include:` from
+  another file/project are never inspected - see
+  [ADR 0005](docs/adr/0005-ci-tag-management-scope.md).
 - **Regex ReDoS**: not specifically mitigated beyond relying on Go's RE2-
   derived `regexp` package, which has linear-time matching guarantees
   regardless of pattern shape.
@@ -508,7 +551,61 @@ Highlights:
   structured so a secret-resolution abstraction can be added without
   changing call sites.
 
-## 24. Roadmap
+## 24. Pipeline tag cleanup
+
+Adds a CI tag to the `default: tags:` block of every project's
+`.gitlab-ci.yml` in scope (creating the block if missing), and to any job
+that already defines its own `tags:` list. A job with no `tags:` of its
+own is left alone - it already inherits from `default:`. Changes are
+**never** committed directly: `execute --apply` opens one Merge Request
+per affected project; nothing merges it automatically.
+
+```bash
+scm-cleaner pipelines evaluate --group company --recursive --tag k8s-runner
+
+scm-cleaner pipelines plan \
+  --group company --recursive --tag k8s-runner \
+  --output-plan pipeline-tags.json
+
+scm-cleaner execute pipeline-tags.json               # dry run
+scm-cleaner execute pipeline-tags.json --apply \
+  --non-interactive --confirm-scope company          # opens the Merge Requests
+```
+
+Jobs defined only via `include:` (another file or project) are not
+covered - `pipelines evaluate`/`plan` flags this per project as a warning
+reason rather than silently missing them. See
+[ADR 0005](docs/adr/0005-ci-tag-management-scope.md).
+
+## 25. Runner tag cleanup
+
+Adds a CI tag directly to the `tag_list` of runners used by projects in
+scope, via the GitLab Runner API - as opposed to §24, which edits
+`.gitlab-ci.yml` files. If a runner is **shared**, this can affect
+projects *outside* the scope you evaluated. Every report shows that blast
+radius explicitly:
+
+```bash
+scm-cleaner runners list --group company --recursive
+scm-cleaner runners evaluate --group company --recursive --tag k8s-runner
+
+scm-cleaner runners plan \
+  --group company --recursive --tag k8s-runner \
+  --output-plan runner-tags.json
+
+scm-cleaner execute runner-tags.json                 # dry run
+scm-cleaner execute runner-tags.json --apply --non-interactive \
+  --confirm-scope company \
+  --confirm-out-of-scope-impact 3                    # must equal the plan's total exactly
+```
+
+`--confirm-out-of-scope-impact` is required (in both interactive and
+non-interactive contexts) whenever a plan touches a shared runner used
+outside the evaluated scope; `execute` prints every affected out-of-scope
+project path so you can actually look at them before confirming. See
+[ADR 0005](docs/adr/0005-ci-tag-management-scope.md).
+
+## 26. Roadmap
 
 - GitHub adapter (organizations, repositories, members) as the second
   concrete provider, validating the abstraction with a real second

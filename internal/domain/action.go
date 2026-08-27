@@ -6,8 +6,10 @@ import "time"
 type ResourceType string
 
 const (
-	ResourceTypeProject ResourceType = "project"
-	ResourceTypeUser    ResourceType = "user"
+	ResourceTypeProject        ResourceType = "project"
+	ResourceTypeUser           ResourceType = "user"
+	ResourceTypePipelineConfig ResourceType = "pipeline_config"
+	ResourceTypeRunner         ResourceType = "runner"
 )
 
 // ActionType is a specific, provider-independent operation that can be
@@ -23,6 +25,8 @@ const (
 	ActionRemoveGroupMember ActionType = "remove-from-group"
 	ActionBlockUser         ActionType = "block"
 	ActionDeleteUser        ActionType = "delete-user"
+	ActionAddPipelineTag    ActionType = "add-pipeline-tag"
+	ActionAddRunnerTag      ActionType = "add-runner-tag"
 )
 
 // PlannedAction is a single, concrete, resource-identified operation that
@@ -37,6 +41,23 @@ type PlannedAction struct {
 	// GroupID is required for user actions that operate on a specific
 	// group membership (e.g. remove-from-group); empty for project actions.
 	GroupID string `json:"groupId,omitempty"`
+	// AccessLevel captures the direct membership role observed while a user
+	// removal was planned. Execution compares it with the live membership and
+	// skips the action if the role changed in the meantime.
+	AccessLevel AccessLevel `json:"accessLevel,omitempty"`
+
+	// TagValue is the CI tag being added, for ActionAddPipelineTag and
+	// ActionAddRunnerTag actions only.
+	TagValue string `json:"tagValue,omitempty"`
+	// OutOfScopeProjectCount is set only for ActionAddRunnerTag: the
+	// number of projects using that runner outside the evaluated scope
+	// (0 for a non-shared runner, or one only used within scope). This
+	// drives the mandatory --confirm-out-of-scope-impact execution guard.
+	OutOfScopeProjectCount int `json:"outOfScopeProjectCount,omitempty"`
+	// OutOfScopeProjectPaths lists the actual out-of-scope projects (not
+	// just the count), so an operator can see exactly what would be
+	// affected before confirming.
+	OutOfScopeProjectPaths []string `json:"outOfScopeProjectPaths,omitempty"`
 
 	Action ActionType `json:"action"`
 	Reason []string   `json:"reason"`

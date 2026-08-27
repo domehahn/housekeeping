@@ -12,12 +12,13 @@ import (
 
 func mapProject(p *gitlab.Project) domain.Project {
 	proj := domain.Project{
-		ID:       strconv.FormatInt(p.ID, 10),
-		Name:     p.Name,
-		Path:     p.Path,
-		FullPath: p.PathWithNamespace,
-		Archived: p.Archived,
-		WebURL:   p.WebURL,
+		ID:            strconv.FormatInt(p.ID, 10),
+		Name:          p.Name,
+		Path:          p.Path,
+		FullPath:      p.PathWithNamespace,
+		Archived:      p.Archived,
+		WebURL:        p.WebURL,
+		DefaultBranch: p.DefaultBranch,
 	}
 	if p.CreatedAt != nil {
 		proj.CreatedAt = *p.CreatedAt
@@ -128,6 +129,29 @@ func baseUserFields(u *gitlab.User) domain.User {
 		State:    mapUserState(u.State),
 		WebURL:   u.WebURL,
 	}
+}
+
+// mapRunner maps a runner's details plus its full project list into a
+// domain.Runner, splitting that project list into in-scope/out-of-scope
+// by comparing against inScopeProjectIDs (the set of project IDs the
+// current evaluation actually covers) - this is what makes the
+// shared-runner blast radius visible.
+func mapRunner(d *gitlab.RunnerDetails, inScopeProjectIDs map[string]bool) domain.Runner {
+	r := domain.Runner{
+		ID:          strconv.FormatInt(d.ID, 10),
+		Description: d.Description,
+		TagList:     append([]string{}, d.TagList...),
+		Shared:      d.IsShared,
+	}
+	for _, p := range d.Projects {
+		id := strconv.FormatInt(p.ID, 10)
+		if inScopeProjectIDs[id] {
+			r.InScopeProjectPaths = append(r.InScopeProjectPaths, p.PathWithNamespace)
+		} else {
+			r.OutOfScopeProjectPaths = append(r.OutOfScopeProjectPaths, p.PathWithNamespace)
+		}
+	}
+	return r
 }
 
 func mapUserMembership(m *gitlab.UserMembership) domain.Membership {

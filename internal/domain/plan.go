@@ -5,7 +5,7 @@ import "time"
 // PlanVersion is the current on-disk plan schema version. Execution refuses
 // to run a plan whose version it does not understand - see
 // docs/adr/0002-plan-before-execute.md.
-const PlanVersion = 1
+const PlanVersion = 2
 
 // Plan is the durable, reviewable artifact produced by a `plan` command and
 // consumed by `execute`. It intentionally captures enough context

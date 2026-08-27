@@ -116,13 +116,17 @@ type SafetyConfig struct {
 }
 
 type MaxActionsConfig struct {
-	Projects int `yaml:"projects"`
-	Users    int `yaml:"users"`
+	Projects     int `yaml:"projects"`
+	Users        int `yaml:"users"`
+	PipelineTags int `yaml:"pipeline_tags"`
+	RunnerTags   int `yaml:"runner_tags"`
 }
 
 type MaxPercentageConfig struct {
-	Projects int `yaml:"projects"`
-	Users    int `yaml:"users"`
+	Projects     int `yaml:"projects"`
+	Users        int `yaml:"users"`
+	PipelineTags int `yaml:"pipeline_tags"`
+	RunnerTags   int `yaml:"runner_tags"`
 }
 
 type ExecutionConfig struct {
@@ -135,7 +139,7 @@ type PerformanceConfig struct {
 }
 
 // Default returns a Config populated with safe defaults. Loading merges a
-// config file, then environment, then CLI flags, on top of this - see
+// config file, then CLI flags, on top of this - see
 // docs/architecture.md "Configuration hierarchy".
 func Default() Config {
 	return Config{
@@ -149,8 +153,8 @@ func Default() Config {
 			Inactive:        UserInactiveConfig{Match: "all"},
 		},
 		Safety: SafetyConfig{
-			MaxActions:    MaxActionsConfig{Projects: 10, Users: 20},
-			MaxPercentage: MaxPercentageConfig{Projects: 0, Users: 0}, // 0 = disabled
+			MaxActions:    MaxActionsConfig{Projects: 10, Users: 20, PipelineTags: 10, RunnerTags: 5},
+			MaxPercentage: MaxPercentageConfig{Projects: 0, Users: 0, PipelineTags: 0, RunnerTags: 0}, // 0 = disabled
 		},
 		Execution: ExecutionConfig{
 			Revalidate: true,
@@ -233,14 +237,17 @@ func (c Config) Validate() error {
 		return fmt.Errorf("config: users.inactive.billable_access_level_threshold contains unknown level %q", c.Users.Inactive.BillableAccessLevelThreshold)
 	}
 
-	if c.Safety.MaxActions.Projects < 0 || c.Safety.MaxActions.Users < 0 {
+	if c.Safety.MaxActions.Projects < 0 || c.Safety.MaxActions.Users < 0 ||
+		c.Safety.MaxActions.PipelineTags < 0 || c.Safety.MaxActions.RunnerTags < 0 {
 		return fmt.Errorf("config: safety.max_actions values must not be negative")
 	}
-	if c.Safety.MaxPercentage.Projects < 0 || c.Safety.MaxPercentage.Projects > 100 {
-		return fmt.Errorf("config: safety.max_percentage.projects must be between 0 and 100")
-	}
-	if c.Safety.MaxPercentage.Users < 0 || c.Safety.MaxPercentage.Users > 100 {
-		return fmt.Errorf("config: safety.max_percentage.users must be between 0 and 100")
+	for name, pct := range map[string]int{
+		"projects": c.Safety.MaxPercentage.Projects, "users": c.Safety.MaxPercentage.Users,
+		"pipeline_tags": c.Safety.MaxPercentage.PipelineTags, "runner_tags": c.Safety.MaxPercentage.RunnerTags,
+	} {
+		if pct < 0 || pct > 100 {
+			return fmt.Errorf("config: safety.max_percentage.%s must be between 0 and 100", name)
+		}
 	}
 
 	if c.Performance.Workers < 0 {

@@ -14,9 +14,9 @@ import (
 )
 
 // globalFlags holds every persistent (root-level) CLI flag. Values here
-// take precedence over the config file and environment, per the
-// documented configuration hierarchy: Default < Config File < Environment
-// < CLI Flags.
+// take precedence over the config file, per the documented configuration
+// hierarchy: Default < Config File < CLI Flags. Secret values are resolved
+// separately from their configured environment variable.
 type globalFlags struct {
 	configPath string
 	output     string

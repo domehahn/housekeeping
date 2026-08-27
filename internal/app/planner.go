@@ -53,9 +53,78 @@ func BuildUserPlan(
 			ResourceID:   m.User.ID,
 			ResourceName: m.User.Username,
 			GroupID:      m.User.GroupID,
+			AccessLevel:  m.User.AccessLevel,
 			Action:       action,
 			Reason:       m.Evaluation.Reasons,
 			EvaluatedAt:  now,
+		})
+	}
+	return domain.Plan{
+		Version:   domain.PlanVersion,
+		Provider:  providerName,
+		Instance:  instance,
+		Scope:     toPlanScope(scope),
+		CreatedAt: now,
+		Actions:   actions,
+	}
+}
+
+// BuildPipelineTagPlan turns matched (non-protected) pipeline-tag
+// evaluations into a domain.Plan of ActionAddPipelineTag actions.
+func BuildPipelineTagPlan(
+	providerName, instance string,
+	scope domain.Scope,
+	matched []PipelineTagEvaluation,
+	tag string,
+	clock domain.Clock,
+) domain.Plan {
+	actions := make([]domain.PlannedAction, 0, len(matched))
+	now := clock.Now()
+	for _, m := range matched {
+		actions = append(actions, domain.PlannedAction{
+			ResourceType: domain.ResourceTypePipelineConfig,
+			ResourceID:   m.Project.ID,
+			ResourceName: m.Project.FullPath,
+			TagValue:     tag,
+			Action:       domain.ActionAddPipelineTag,
+			Reason:       m.Reasons,
+			EvaluatedAt:  now,
+		})
+	}
+	return domain.Plan{
+		Version:   domain.PlanVersion,
+		Provider:  providerName,
+		Instance:  instance,
+		Scope:     toPlanScope(scope),
+		CreatedAt: now,
+		Actions:   actions,
+	}
+}
+
+// BuildRunnerTagPlan turns matched runner-tag evaluations into a
+// domain.Plan of ActionAddRunnerTag actions. Scope here is informational
+// only (runners are not themselves scoped the way projects/users are) -
+// GroupID/AccessLevel are left empty.
+func BuildRunnerTagPlan(
+	providerName, instance string,
+	scope domain.Scope,
+	matched []RunnerTagEvaluation,
+	tag string,
+	clock domain.Clock,
+) domain.Plan {
+	actions := make([]domain.PlannedAction, 0, len(matched))
+	now := clock.Now()
+	for _, m := range matched {
+		actions = append(actions, domain.PlannedAction{
+			ResourceType:           domain.ResourceTypeRunner,
+			ResourceID:             m.Runner.ID,
+			ResourceName:           m.Runner.Description,
+			TagValue:               tag,
+			Action:                 domain.ActionAddRunnerTag,
+			Reason:                 m.Reasons,
+			EvaluatedAt:            now,
+			OutOfScopeProjectCount: m.OutOfScopeProjectCount(),
+			OutOfScopeProjectPaths: m.Runner.OutOfScopeProjectPaths,
 		})
 	}
 	return domain.Plan{

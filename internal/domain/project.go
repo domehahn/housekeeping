@@ -24,4 +24,10 @@ type Project struct {
 	// Namespace is the full path of the group/namespace the project lives
 	// in, used for scoping and protection-rule matching.
 	Namespace string
+
+	// DefaultBranch is the project's default branch (e.g. "main"). Used by
+	// CI tag management to know where to read .gitlab-ci.yml from and
+	// which branch a proposed change's Merge Request should target. Empty
+	// for an empty repository (no commits yet).
+	DefaultBranch string
 }

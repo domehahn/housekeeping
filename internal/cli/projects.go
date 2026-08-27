@@ -123,8 +123,9 @@ func newProjectsPlanCmd(e *env) *cobra.Command {
 			matched := summary.Matched()
 			plan := app.BuildProjectPlan(info.Provider, info.Instance, scope, matched, action, e.clock)
 
-			limits := resolveSafetyLimits(e, maxActions, maxPercentage, true)
-			if violations := app.CheckGuards(plan, summary.Discovered(), 0, limits); len(violations) > 0 {
+			limits := resolveSafetyLimits(e, maxActions, maxPercentage, domain.ResourceTypeProject)
+			discovered := map[domain.ResourceType]int{domain.ResourceTypeProject: summary.Discovered()}
+			if violations := app.CheckGuards(plan, discovered, limits); len(violations) > 0 {
 				for _, v := range violations {
 					cmd.PrintErrln("SAFETY GUARD:", v.Error())
 				}

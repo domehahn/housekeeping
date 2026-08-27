@@ -152,6 +152,25 @@ func (a *Adapter) RemoveGroupMember(ctx context.Context, groupID string, userID 
 	return nil
 }
 
+// GetGroupMember fetches the direct membership that a remove-from-group
+// action targets. The direct endpoint deliberately does not resolve inherited
+// membership, because inherited access cannot safely be removed here.
+func (a *Adapter) GetGroupMember(ctx context.Context, groupID string, userID string) (domain.User, error) {
+	gid, err := strconv.ParseInt(groupID, 10, 64)
+	if err != nil {
+		return domain.User{}, fmt.Errorf("gitlab: invalid group ID %q: %w", groupID, err)
+	}
+	uid, err := strconv.ParseInt(userID, 10, 64)
+	if err != nil {
+		return domain.User{}, fmt.Errorf("gitlab: invalid user ID %q: %w", userID, err)
+	}
+	member, _, err := a.gl.GroupMembers.GetGroupMember(gid, uid, gitlab.WithContext(ctx))
+	if err != nil {
+		return domain.User{}, classify(fmt.Sprintf("get member %s of group %s", userID, groupID), err)
+	}
+	return mapGroupMember(member, groupID), nil
+}
+
 // BlockUser blocks a user account instance-wide. Requires administrator
 // rights; a non-admin token receives a provider.KindAuthorization error.
 func (a *Adapter) BlockUser(ctx context.Context, userID string) error {

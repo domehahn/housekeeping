@@ -9,6 +9,9 @@ stages:
 variables:
   GOPATH: "$CI_PROJECT_DIR/.go"
   GOFLAGS: "-mod=mod"
+  # Jobs that opt into `.runner-tagged` can override this in project/group
+  # CI/CD variables without editing the pipeline file.
+  SCM_CLEANER_RUNNER_TAG: "docker"
 
 default:
   image: golang:1.24
@@ -16,6 +19,17 @@ default:
     key: go-mod-cache
     paths:
       - .go/pkg/mod/
+
+# Optional runner selection for installations that require tagged runners.
+# Add `extends: .runner-tagged` to a job (or copy the tags block to `default`)
+# and set SCM_CLEANER_RUNNER_TAG in the project's CI/CD variables. This
+# project's own pipeline manages its runner tag this way rather than
+# mutating its own runner registration; scm-cleaner itself CAN manage job
+# and runner tags for other projects/groups as a deliberate, guarded
+# feature (see README §24/§25) - it just isn't used on itself here.
+.runner-tagged:
+  tags:
+    - "$SCM_CLEANER_RUNNER_TAG"
 
 format-check:
   stage: check
@@ -46,7 +60,7 @@ race-test:
 build:
   stage: build
   script:
-    - go build ./...
+    - make build
   artifacts:
     paths:
       - bin/

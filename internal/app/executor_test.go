@@ -22,17 +22,57 @@ type fakeExecutor struct {
 	blockedUsers     map[string]bool
 
 	failDeleteProject string // if set, DeleteProject for this ID returns a generic error
+	currentUserID     string
+	currentUserErr    error
+
+	ciFiles           map[string][]byte // projectID -> content; absent key means no CI file
+	proposedMRs       map[string]string // projectID -> tag, recording every ProposePipelineTagChange call
+	proposeMRURL      string
+	proposeMRErr      error
+	runnerTags        map[string][]string // runnerID -> current tags
+	updatedRunnerTags map[string][]string
 }
 
 func newFakeExecutor() *fakeExecutor {
 	return &fakeExecutor{
-		projects:         map[string]domain.Project{},
-		users:            map[string]domain.User{},
-		deletedProjects:  map[string]bool{},
-		archivedProjects: map[string]bool{},
-		removedMembers:   map[string]bool{},
-		blockedUsers:     map[string]bool{},
+		projects:          map[string]domain.Project{},
+		users:             map[string]domain.User{},
+		deletedProjects:   map[string]bool{},
+		archivedProjects:  map[string]bool{},
+		removedMembers:    map[string]bool{},
+		blockedUsers:      map[string]bool{},
+		currentUserID:     "current",
+		ciFiles:           map[string][]byte{},
+		proposedMRs:       map[string]string{},
+		runnerTags:        map[string][]string{},
+		updatedRunnerTags: map[string][]string{},
 	}
+}
+
+func (f *fakeExecutor) GetPipelineConfig(_ context.Context, projectID string) ([]byte, bool, error) {
+	content, ok := f.ciFiles[projectID]
+	return content, ok, nil
+}
+
+func (f *fakeExecutor) ProposePipelineTagChange(_ context.Context, projectID string, _ []byte, tag string) (string, error) {
+	if f.proposeMRErr != nil {
+		return "", f.proposeMRErr
+	}
+	f.proposedMRs[projectID] = tag
+	if f.proposeMRURL != "" {
+		return f.proposeMRURL, nil
+	}
+	return "https://gitlab.example.com/mr/1", nil
+}
+
+func (f *fakeExecutor) GetRunnerTags(_ context.Context, runnerID string) ([]string, error) {
+	return f.runnerTags[runnerID], nil
+}
+
+func (f *fakeExecutor) UpdateRunnerTags(_ context.Context, runnerID string, tags []string) error {
+	f.updatedRunnerTags[runnerID] = tags
+	f.runnerTags[runnerID] = tags
+	return nil
 }
 
 func (f *fakeExecutor) GetProject(_ context.Context, id string) (domain.Project, error) {
@@ -64,6 +104,50 @@ func (f *fakeExecutor) GetUser(_ context.Context, id string) (domain.User, error
 	if !ok {
 		return domain.User{}, provider.NewError(provider.KindNotFound, "get user", "not found", nil)
 	}
+	return u, nil
+}
+
+func (f *fakeExecutor) CurrentUser(_ context.Context) (domain.User, error) {
+	if f.currentUserErr != nil {
+		return domain.User{}, f.currentUserErr
+	}
+	return domain.User{ID: f.currentUserID, Username: "cleanup-bot"}, nil
+}
+
+func TestExecute_RevalidationSkipsCurrentUser(t *testing.T) {
+	f := newFakeExecutor()
+	f.currentUserID = "1"
+	f.users["1"] = domain.User{ID: "1", Username: "cleanup-bot"}
+	p := domain.Plan{Actions: []domain.PlannedAction{{
+		ResourceType: domain.ResourceTypeUser, ResourceID: "1", ResourceName: "cleanup-bot",
+		Action: domain.ActionBlockUser, EvaluatedAt: time.Now(),
+	}}}
+	summary := Execute(context.Background(), f, p, ExecuteOptions{Apply: true, Revalidate: false})
+	if summary.Outcomes[0].Result != domain.ResultSkippedRevalidate || f.blockedUsers["1"] {
+		t.Fatalf("current user must be protected, got %+v", summary.Outcomes[0])
+	}
+}
+
+func TestExecute_RevalidationSkipsChangedMembershipRole(t *testing.T) {
+	f := newFakeExecutor()
+	f.users["1"] = domain.User{ID: "1", Username: "alice", AccessLevel: domain.AccessLevelOwner}
+	p := domain.Plan{Actions: []domain.PlannedAction{{
+		ResourceType: domain.ResourceTypeUser, ResourceID: "1", ResourceName: "alice", GroupID: "10",
+		AccessLevel: domain.AccessLevelDeveloper, Action: domain.ActionRemoveGroupMember, EvaluatedAt: time.Now(),
+	}}}
+	summary := Execute(context.Background(), f, p, ExecuteOptions{Apply: true, Revalidate: true})
+	if summary.Outcomes[0].Result != domain.ResultSkippedRevalidate || f.removedMembers["10/1"] {
+		t.Fatalf("changed membership role must skip removal, got %+v", summary.Outcomes[0])
+	}
+}
+
+func (f *fakeExecutor) GetGroupMember(_ context.Context, groupID, userID string) (domain.User, error) {
+	u, ok := f.users[userID]
+	if !ok {
+		return domain.User{}, provider.NewError(provider.KindNotFound, "get member", "not found", nil)
+	}
+	u.GroupID = groupID
+	u.MembershipOrigin = domain.MembershipDirect
 	return u, nil
 }
 
@@ -199,5 +283,108 @@ func TestExecute_UserRemoveFromGroupRequiresGroupID(t *testing.T) {
 	summary := Execute(context.Background(), f, p, ExecuteOptions{Apply: true, Revalidate: true})
 	if summary.Outcomes[0].Result != domain.ResultFailed {
 		t.Errorf("expected failure for a remove-from-group action with no group ID, got %v", summary.Outcomes[0].Result)
+	}
+}
+
+func TestExecute_AddPipelineTag_OpensMergeRequest(t *testing.T) {
+	f := newFakeExecutor()
+	f.ciFiles["1"] = []byte("build-job:\n  script: [\"echo hi\"]\n")
+	f.proposeMRURL = "https://gitlab.example.com/group/proj/-/merge_requests/42"
+
+	p := domain.Plan{Actions: []domain.PlannedAction{
+		{ResourceType: domain.ResourceTypePipelineConfig, ResourceID: "1", Action: domain.ActionAddPipelineTag, TagValue: "k8s-runner", EvaluatedAt: time.Now()},
+	}}
+	summary := Execute(context.Background(), f, p, ExecuteOptions{Apply: true, Revalidate: true})
+
+	if f.proposedMRs["1"] != "k8s-runner" {
+		t.Errorf("expected a Merge Request to be proposed for project 1 with tag k8s-runner, got %+v", f.proposedMRs)
+	}
+	if summary.Outcomes[0].Result != domain.ResultSuccess {
+		t.Fatalf("expected ResultSuccess, got %v: %s", summary.Outcomes[0].Result, summary.Outcomes[0].Detail)
+	}
+	if summary.Outcomes[0].Detail == "" {
+		t.Error("expected the outcome detail to contain the Merge Request URL")
+	}
+}
+
+func TestExecute_AddPipelineTag_AlreadyPresentIsIdempotent(t *testing.T) {
+	f := newFakeExecutor()
+	f.ciFiles["1"] = []byte("default:\n  tags:\n    - k8s-runner\n\nbuild-job:\n  script: [\"echo hi\"]\n")
+
+	p := domain.Plan{Actions: []domain.PlannedAction{
+		{ResourceType: domain.ResourceTypePipelineConfig, ResourceID: "1", Action: domain.ActionAddPipelineTag, TagValue: "k8s-runner", EvaluatedAt: time.Now()},
+	}}
+	summary := Execute(context.Background(), f, p, ExecuteOptions{Apply: true, Revalidate: true})
+
+	if len(f.proposedMRs) != 0 {
+		t.Errorf("expected no Merge Request when the tag is already present, got %+v", f.proposedMRs)
+	}
+	if summary.Outcomes[0].Result != domain.ResultSkippedAlreadyDone {
+		t.Errorf("expected ResultSkippedAlreadyDone, got %v: %s", summary.Outcomes[0].Result, summary.Outcomes[0].Detail)
+	}
+}
+
+func TestExecute_AddPipelineTag_MissingCIFileIsIdempotent(t *testing.T) {
+	f := newFakeExecutor() // no ciFiles entry for project "1"
+
+	p := domain.Plan{Actions: []domain.PlannedAction{
+		{ResourceType: domain.ResourceTypePipelineConfig, ResourceID: "1", Action: domain.ActionAddPipelineTag, TagValue: "k8s-runner", EvaluatedAt: time.Now()},
+	}}
+	summary := Execute(context.Background(), f, p, ExecuteOptions{Apply: true, Revalidate: true})
+
+	if summary.Outcomes[0].Result != domain.ResultSkippedAlreadyDone {
+		t.Errorf("expected ResultSkippedAlreadyDone for a project whose .gitlab-ci.yml disappeared, got %v", summary.Outcomes[0].Result)
+	}
+}
+
+func TestExecute_AddPipelineTag_DryRunNeverOpensMergeRequest(t *testing.T) {
+	f := newFakeExecutor()
+	f.ciFiles["1"] = []byte("build-job:\n  script: [\"echo hi\"]\n")
+
+	p := domain.Plan{Actions: []domain.PlannedAction{
+		{ResourceType: domain.ResourceTypePipelineConfig, ResourceID: "1", Action: domain.ActionAddPipelineTag, TagValue: "k8s-runner", EvaluatedAt: time.Now()},
+	}}
+	summary := Execute(context.Background(), f, p, ExecuteOptions{Apply: false, Revalidate: true})
+
+	if len(f.proposedMRs) != 0 {
+		t.Error("dry run must never open a Merge Request")
+	}
+	if summary.Outcomes[0].Result != domain.ResultDryRun {
+		t.Errorf("expected ResultDryRun, got %v", summary.Outcomes[0].Result)
+	}
+}
+
+func TestExecute_AddRunnerTag_UpdatesTagList(t *testing.T) {
+	f := newFakeExecutor()
+	f.runnerTags["5"] = []string{"existing-tag"}
+
+	p := domain.Plan{Actions: []domain.PlannedAction{
+		{ResourceType: domain.ResourceTypeRunner, ResourceID: "5", Action: domain.ActionAddRunnerTag, TagValue: "k8s-runner", EvaluatedAt: time.Now()},
+	}}
+	summary := Execute(context.Background(), f, p, ExecuteOptions{Apply: true, Revalidate: true})
+
+	got := f.updatedRunnerTags["5"]
+	if len(got) != 2 || got[0] != "existing-tag" || got[1] != "k8s-runner" {
+		t.Errorf("expected tags to become [existing-tag, k8s-runner], got %v", got)
+	}
+	if summary.Outcomes[0].Result != domain.ResultSuccess {
+		t.Errorf("expected ResultSuccess, got %v: %s", summary.Outcomes[0].Result, summary.Outcomes[0].Detail)
+	}
+}
+
+func TestExecute_AddRunnerTag_AlreadyPresentIsIdempotent(t *testing.T) {
+	f := newFakeExecutor()
+	f.runnerTags["5"] = []string{"k8s-runner"}
+
+	p := domain.Plan{Actions: []domain.PlannedAction{
+		{ResourceType: domain.ResourceTypeRunner, ResourceID: "5", Action: domain.ActionAddRunnerTag, TagValue: "k8s-runner", EvaluatedAt: time.Now()},
+	}}
+	summary := Execute(context.Background(), f, p, ExecuteOptions{Apply: true, Revalidate: true})
+
+	if len(f.updatedRunnerTags) != 0 {
+		t.Errorf("expected no update when the tag is already present, got %+v", f.updatedRunnerTags)
+	}
+	if summary.Outcomes[0].Result != domain.ResultSkippedAlreadyDone {
+		t.Errorf("expected ResultSkippedAlreadyDone, got %v: %s", summary.Outcomes[0].Result, summary.Outcomes[0].Detail)
 	}
 }

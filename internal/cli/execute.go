@@ -12,12 +12,14 @@ import (
 	"github.com/domehahn/housekeeping/internal/audit"
 	"github.com/domehahn/housekeeping/internal/domain"
 	"github.com/domehahn/housekeeping/internal/output"
+	projectpolicy "github.com/domehahn/housekeeping/internal/policy/project"
+	userpolicy "github.com/domehahn/housekeeping/internal/policy/user"
 )
 
 func newExecuteCmd(e *env) *cobra.Command {
 	var apply, nonInteractive bool
 	var confirmScope string
-	var maxActions, maxPercentage int
+	var maxActions, maxPercentage, confirmOutOfScopeImpactFlag int
 
 	cmd := &cobra.Command{
 		Use:   "execute <plan-file>",
@@ -54,15 +56,17 @@ against unattended misfires (e.g. a misconfigured CI job).`,
 				return exitErr(ExitPlanValidationFailed, err)
 			}
 
-			isProjects := resourceMajority(plan) == domain.ResourceTypeProject
-			limits := resolveSafetyLimits(e, maxActions, maxPercentage, isProjects)
+			limits := resolveSafetyLimits(e, maxActions, maxPercentage, resourceMajority(plan))
 			// The percentage guard needs a "discovered" total that a plan
 			// file alone does not carry (that check already ran, against
 			// the real total, when the plan was created) - so it is
 			// deliberately disabled here and only the absolute max-actions
 			// guard, which needs no discovered count, is re-checked.
-			limits.MaxPercentageProjects, limits.MaxPercentageUsers = 0, 0
-			if violations := app.CheckGuards(plan, 0, 0, limits); len(violations) > 0 {
+			for rt, l := range limits.Limits {
+				l.MaxPercentage = 0
+				limits.Limits[rt] = l
+			}
+			if violations := app.CheckGuards(plan, nil, limits); len(violations) > 0 {
 				for _, v := range violations {
 					cmd.PrintErrln("SAFETY GUARD:", v.Error())
 				}
@@ -70,6 +74,11 @@ against unattended misfires (e.g. a misconfigured CI job).`,
 			}
 
 			if apply {
+				if outOfScope := totalOutOfScopeImpact(plan); outOfScope > 0 {
+					if err := confirmOutOfScopeImpact(cmd, plan, outOfScope, confirmOutOfScopeImpactFlag); err != nil {
+						return err
+					}
+				}
 				if err := confirmApply(cmd, plan, nonInteractive, confirmScope); err != nil {
 					return err
 				}
@@ -81,17 +90,40 @@ against unattended misfires (e.g. a misconfigured CI job).`,
 			if err != nil {
 				return err
 			}
-			defer auditLog.Close()
+
+			projectProtection, err := projectpolicy.NewProtection(e.cfg.Projects.Protection.Paths, e.cfg.Projects.Protection.Regex)
+			if err != nil {
+				_ = auditLog.Close()
+				return exitErr(ExitInvalidConfiguration, err)
+			}
+			userProtection, err := userpolicy.NewProtection(
+				e.cfg.Users.Protection.Usernames,
+				e.cfg.Users.Protection.Regex,
+				e.cfg.Users.Protection.AccessLevels,
+				"", // app.Execute independently resolves and always protects the caller.
+			)
+			if err != nil {
+				_ = auditLog.Close()
+				return exitErr(ExitInvalidConfiguration, err)
+			}
 
 			summary := app.Execute(ctx, client, plan, app.ExecuteOptions{
-				Apply:      apply,
-				Revalidate: e.cfg.Execution.Revalidate,
-				FailFast:   e.cfg.Execution.FailFast,
+				Apply:             apply,
+				Revalidate:        e.cfg.Execution.Revalidate,
+				FailFast:          e.cfg.Execution.FailFast,
+				ProjectProtection: projectProtection,
+				UserProtection:    userProtection,
 			})
 
 			for _, o := range summary.Outcomes {
 				rec := audit.FromOutcome(e.clock.Now(), plan.Provider, plan.Instance, plan.Scope.Path, o)
-				_ = auditLog.Write(rec)
+				if err := auditLog.Write(rec); err != nil {
+					_ = auditLog.Close()
+					return exitErr(ExitGeneralError, err)
+				}
+			}
+			if err := auditLog.Close(); err != nil {
+				return exitErr(ExitGeneralError, fmt.Errorf("close audit log: %w", err))
 			}
 
 			if err := renderExecutionSummary(cmd, e, summary); err != nil {
@@ -113,22 +145,73 @@ against unattended misfires (e.g. a misconfigured CI job).`,
 	cmd.Flags().StringVar(&confirmScope, "confirm-scope", "", "must equal the plan's scope path; required for --apply --non-interactive")
 	cmd.Flags().IntVar(&maxActions, "max-actions", 0, "override the safety.max_actions guard for this run's resource type (must be explicit)")
 	cmd.Flags().IntVar(&maxPercentage, "max-percentage", 0, "override the safety.max_percentage guard for this run's resource type (must be explicit)")
+	cmd.Flags().IntVar(&confirmOutOfScopeImpactFlag, "confirm-out-of-scope-impact", 0,
+		"required, and must exactly equal the plan's total out-of-scope project impact, when the plan contains any runner-tag action affecting a shared runner used outside the evaluated scope")
 	return cmd
 }
 
+// resourceMajority picks which resource type a plan-level --max-actions/
+// --max-percentage override applies to: the type with the most planned
+// actions, with a fixed, deterministic tie-break order.
 func resourceMajority(plan domain.Plan) domain.ResourceType {
-	projects, users := 0, 0
+	counts := map[domain.ResourceType]int{}
 	for _, a := range plan.Actions {
-		if a.ResourceType == domain.ResourceTypeProject {
-			projects++
-		} else {
-			users++
+		counts[a.ResourceType]++
+	}
+	best := domain.ResourceTypeProject
+	bestCount := -1
+	for _, rt := range []domain.ResourceType{
+		domain.ResourceTypeProject, domain.ResourceTypeUser,
+		domain.ResourceTypePipelineConfig, domain.ResourceTypeRunner,
+	} {
+		if counts[rt] > bestCount {
+			best, bestCount = rt, counts[rt]
 		}
 	}
-	if projects >= users {
-		return domain.ResourceTypeProject
+	return best
+}
+
+// totalOutOfScopeImpact sums OutOfScopeProjectCount across every
+// ActionAddRunnerTag in the plan - the number of projects a shared-runner
+// tag change would affect outside the scope that was actually evaluated.
+func totalOutOfScopeImpact(plan domain.Plan) int {
+	total := 0
+	for _, a := range plan.Actions {
+		if a.Action == domain.ActionAddRunnerTag {
+			total += a.OutOfScopeProjectCount
+		}
 	}
-	return domain.ResourceTypeUser
+	return total
+}
+
+// confirmOutOfScopeImpact requires an explicit, exact-match
+// --confirm-out-of-scope-impact=<N> before a plan touching a shared
+// runner used outside the evaluated scope can proceed at all - in both
+// interactive and non-interactive contexts, since this risk is
+// independent of TTY-ness. It lists every affected out-of-scope project
+// path so the operator can actually look at them before deciding.
+func confirmOutOfScopeImpact(cmd *cobra.Command, plan domain.Plan, total, confirmed int) error {
+	if confirmed != total {
+		cmd.PrintErrln("WARNING: this plan changes tags on at least one shared runner used by projects outside the evaluated scope:")
+		for _, p := range outOfScopeProjectPaths(plan) {
+			cmd.PrintErrln("  -", p)
+		}
+		return exitErr(ExitGeneralError, fmt.Errorf(
+			"this plan affects %d project(s) outside the evaluated scope; pass --confirm-out-of-scope-impact=%d to proceed", total, total))
+	}
+	return nil
+}
+
+// outOfScopeProjectPaths collects every out-of-scope project path across
+// every ActionAddRunnerTag in the plan.
+func outOfScopeProjectPaths(plan domain.Plan) []string {
+	var paths []string
+	for _, a := range plan.Actions {
+		if a.Action == domain.ActionAddRunnerTag {
+			paths = append(paths, a.OutOfScopeProjectPaths...)
+		}
+	}
+	return paths
 }
 
 // confirmApply enforces the interactive/non-interactive confirmation
@@ -150,6 +233,13 @@ func confirmApply(cmd *cobra.Command, plan domain.Plan, nonInteractive bool, con
 	cmd.Println()
 	cmd.Printf("You are about to execute %d action(s).\n\n", len(plan.Actions))
 	cmd.Printf("Provider: %s\nInstance: %s\nScope:    %s\n\n", plan.Provider, plan.Instance, plan.Scope.Path)
+	if outOfScopePaths := outOfScopeProjectPaths(plan); len(outOfScopePaths) > 0 {
+		cmd.Println("This plan changes tags on a shared runner used by projects OUTSIDE this scope:")
+		for _, p := range outOfScopePaths {
+			cmd.Println("  -", p)
+		}
+		cmd.Println()
+	}
 	cmd.Println("This operation may be irreversible.")
 	cmd.Println()
 	phrase := fmt.Sprintf("apply %d actions", len(plan.Actions))

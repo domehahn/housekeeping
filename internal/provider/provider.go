@@ -53,6 +53,12 @@ type GroupMemberReader interface {
 	ListGroupMembers(ctx context.Context, scope domain.Scope) ([]domain.User, error)
 }
 
+// GroupMemberGetter fetches one direct group membership for safe
+// pre-execution revalidation, including its current access level.
+type GroupMemberGetter interface {
+	GetGroupMember(ctx context.Context, groupID string, userID string) (domain.User, error)
+}
+
 // GroupMemberRemover removes a direct member from a specific group. It must
 // refuse (return a validation error) to attempt removal of a non-direct
 // membership - see docs/architecture.md "GitLab membership semantics".
@@ -85,6 +91,39 @@ type UserMembershipReader interface {
 	ListUserMemberships(ctx context.Context, userID string) ([]domain.Membership, error)
 }
 
+// PipelineConfigProposer reads a project's .gitlab-ci.yml at its default
+// branch and, if a change is needed, opens a Merge Request proposing a CI
+// tag addition. It never commits directly to the default branch - see
+// docs/adr/0005-ci-tag-management-scope.md.
+type PipelineConfigProposer interface {
+	// GetPipelineConfig fetches a project's .gitlab-ci.yml at its default
+	// branch. exists is false (with a nil error) when the project simply
+	// has no CI file - that is a normal, expected case, not a failure.
+	GetPipelineConfig(ctx context.Context, projectID string) (content []byte, exists bool, err error)
+	// ProposePipelineTagChange opens a branch + commit + Merge Request
+	// proposing patchedContent as the new .gitlab-ci.yml. tag is used only
+	// for the branch name/commit message/MR description, not re-validated
+	// here - callers must have already confirmed patchedContent actually
+	// differs from the current file.
+	ProposePipelineTagChange(ctx context.Context, projectID string, patchedContent []byte, tag string) (mergeRequestURL string, err error)
+}
+
+// RunnerScanner lists the runners used by a set of projects, with full
+// blast-radius information: every project using each runner, not just the
+// ones passed in, so shared-runner impact outside the evaluated scope is
+// never hidden.
+type RunnerScanner interface {
+	ListRunnersForProjects(ctx context.Context, projectIDs []string) ([]domain.Runner, error)
+}
+
+// RunnerTagUpdater reads and updates a runner's tag list. The update call
+// replaces the whole list (GitLab's API is not additive), so callers
+// fetch the current list first, compute the desired union, and pass that.
+type RunnerTagUpdater interface {
+	GetRunnerTags(ctx context.Context, runnerID string) ([]string, error)
+	UpdateRunnerTags(ctx context.Context, runnerID string, tags []string) error
+}
+
 // CurrentUserResolver identifies the authenticated caller so it can be
 // automatically excluded from destructive user operations.
 type CurrentUserResolver interface {
@@ -112,6 +151,7 @@ type Client interface {
 	ProjectDeleter
 	ProjectArchiver
 	GroupMemberReader
+	GroupMemberGetter
 	GroupMemberRemover
 	UserGetter
 	UserBlocker
@@ -120,4 +160,7 @@ type Client interface {
 	InfoReporter
 	BillableMembersReader
 	UserMembershipReader
+	PipelineConfigProposer
+	RunnerScanner
+	RunnerTagUpdater
 }

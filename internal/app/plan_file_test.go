@@ -1,6 +1,7 @@
 package app
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
@@ -17,8 +18,99 @@ func samplePlan() domain.Plan {
 		Scope:     domain.PlanScope{Type: domain.ScopeTypeGroup, ID: "1", Path: "engineering"},
 		CreatedAt: time.Date(2026, 8, 14, 0, 0, 0, 0, time.UTC),
 		Actions: []domain.PlannedAction{
-			{ResourceType: domain.ResourceTypeUser, ResourceID: "42", ResourceName: "alice", GroupID: "1", Action: domain.ActionRemoveGroupMember, Reason: []string{"inactive"}},
+			{ResourceType: domain.ResourceTypeUser, ResourceID: "42", ResourceName: "alice", GroupID: "1", AccessLevel: domain.AccessLevelDeveloper, Action: domain.ActionRemoveGroupMember, Reason: []string{"inactive"}, EvaluatedAt: time.Date(2026, 8, 14, 0, 0, 0, 0, time.UTC)},
 		},
+	}
+}
+
+func TestLoadPlan_RejectsMissingHash(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "plan.json")
+	data, err := json.Marshal(samplePlan())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadPlan(path); err == nil {
+		t.Error("expected a missing plan hash to be rejected")
+	}
+}
+
+func TestLoadPlan_RejectsActionResourceMismatch(t *testing.T) {
+	p := samplePlan()
+	p.Actions[0].Action = domain.ActionDeleteProject
+	path := filepath.Join(t.TempDir(), "plan.json")
+	if err := SavePlan(path, p); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadPlan(path); err == nil {
+		t.Error("expected a project deletion action targeting a user to be rejected")
+	}
+}
+
+func TestSaveAndLoadPlan_PipelineConfigAction(t *testing.T) {
+	p := samplePlan()
+	p.Actions = []domain.PlannedAction{{
+		ResourceType: domain.ResourceTypePipelineConfig, ResourceID: "1", ResourceName: "company/a",
+		Action: domain.ActionAddPipelineTag, TagValue: "k8s-runner", Reason: []string{"missing"},
+		EvaluatedAt: p.CreatedAt,
+	}}
+	path := filepath.Join(t.TempDir(), "plan.json")
+	if err := SavePlan(path, p); err != nil {
+		t.Fatalf("SavePlan: %v", err)
+	}
+	if _, err := LoadPlan(path); err != nil {
+		t.Errorf("expected a valid pipeline_config action to load, got: %v", err)
+	}
+}
+
+func TestLoadPlan_RejectsPipelineTagActionWithoutTagValue(t *testing.T) {
+	p := samplePlan()
+	p.Actions = []domain.PlannedAction{{
+		ResourceType: domain.ResourceTypePipelineConfig, ResourceID: "1", ResourceName: "company/a",
+		Action: domain.ActionAddPipelineTag, EvaluatedAt: p.CreatedAt, // no TagValue
+	}}
+	path := filepath.Join(t.TempDir(), "plan.json")
+	if err := SavePlan(path, p); err != nil {
+		t.Fatalf("SavePlan: %v", err)
+	}
+	if _, err := LoadPlan(path); err == nil {
+		t.Error("expected an add-pipeline-tag action with no tagValue to be rejected")
+	}
+}
+
+func TestSaveAndLoadPlan_RunnerTagAction(t *testing.T) {
+	p := samplePlan()
+	p.Actions = []domain.PlannedAction{{
+		ResourceType: domain.ResourceTypeRunner, ResourceID: "500", ResourceName: "shared-runner",
+		Action: domain.ActionAddRunnerTag, TagValue: "k8s-runner", Reason: []string{"missing"},
+		OutOfScopeProjectCount: 1, OutOfScopeProjectPaths: []string{"other/project"},
+		EvaluatedAt: p.CreatedAt,
+	}}
+	path := filepath.Join(t.TempDir(), "plan.json")
+	if err := SavePlan(path, p); err != nil {
+		t.Fatalf("SavePlan: %v", err)
+	}
+	if _, err := LoadPlan(path); err != nil {
+		t.Errorf("expected a valid runner action to load, got: %v", err)
+	}
+}
+
+func TestLoadPlan_RejectsRunnerActionWithMismatchedOutOfScopeCount(t *testing.T) {
+	p := samplePlan()
+	p.Actions = []domain.PlannedAction{{
+		ResourceType: domain.ResourceTypeRunner, ResourceID: "500", ResourceName: "shared-runner",
+		Action: domain.ActionAddRunnerTag, TagValue: "k8s-runner",
+		OutOfScopeProjectCount: 5, OutOfScopeProjectPaths: []string{"other/project"}, // 5 != 1
+		EvaluatedAt: p.CreatedAt,
+	}}
+	path := filepath.Join(t.TempDir(), "plan.json")
+	if err := SavePlan(path, p); err != nil {
+		t.Fatalf("SavePlan: %v", err)
+	}
+	if _, err := LoadPlan(path); err == nil {
+		t.Error("expected a mismatched outOfScopeProjectCount to be rejected")
 	}
 }
 

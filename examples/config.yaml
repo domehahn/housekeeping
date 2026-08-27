@@ -1,7 +1,8 @@
 # Example scm-cleaner configuration.
 #
 # Configuration precedence (lowest to highest):
-#   built-in defaults < this file < environment variables < CLI flags
+#   built-in defaults < this file < CLI flags
+# Secrets are resolved separately from the environment variable named below.
 #
 # The access token is never stored here - only the name of the
 # environment variable that holds it (token_env). Set that variable
@@ -91,10 +92,14 @@ safety:
   max_actions:
     projects: 10
     users: 20
+    pipeline_tags: 10
+    runner_tags: 5
 
   max_percentage:
     projects: 20
     users: 10
+    pipeline_tags: 0
+    runner_tags: 0
 
 # --- Execution behavior ---------------------------------------------------
 
