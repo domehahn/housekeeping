@@ -56,7 +56,7 @@ against unattended misfires (e.g. a misconfigured CI job).`,
 	cmd.Flags().IntVar(&flags.maxActions, "max-actions", 0, "override the safety.max_actions guard for this run's resource type (must be explicit)")
 	cmd.Flags().IntVar(&flags.maxPercentage, "max-percentage", 0, "override the safety.max_percentage guard for this run's resource type (must be explicit)")
 	cmd.Flags().IntVar(&flags.confirmOutOfScopeImpact, "confirm-out-of-scope-impact", 0,
-		"required, and must exactly equal the plan's total out-of-scope project impact, when the plan contains any runner-tag action affecting a shared runner used outside the evaluated scope")
+		"required, and must exactly equal the plan's explicit out-of-scope project assignments, when a runner-tag action has such assignments")
 	return cmd
 }
 
@@ -196,8 +196,8 @@ func resourceMajority(plan domain.Plan) domain.ResourceType {
 }
 
 // totalOutOfScopeImpact sums OutOfScopeProjectCount across every
-// ActionAddRunnerTag in the plan - the number of projects a shared-runner
-// tag change would affect outside the scope that was actually evaluated.
+// ActionAddRunnerTag in the plan - the number of explicit project assignments
+// outside the scope that was actually evaluated.
 func totalOutOfScopeImpact(plan domain.Plan) int {
 	total := 0
 	for _, a := range plan.Actions {
@@ -209,14 +209,14 @@ func totalOutOfScopeImpact(plan domain.Plan) int {
 }
 
 // confirmOutOfScopeImpact requires an explicit, exact-match
-// --confirm-out-of-scope-impact=<N> before a plan touching a shared
-// runner used outside the evaluated scope can proceed at all - in both
+// --confirm-out-of-scope-impact=<N> before a plan touching a runner with
+// explicit assignments outside the evaluated scope can proceed at all - in both
 // interactive and non-interactive contexts, since this risk is
 // independent of TTY-ness. It lists every affected out-of-scope project
 // path so the operator can actually look at them before deciding.
 func confirmOutOfScopeImpact(cmd *cobra.Command, plan domain.Plan, total, confirmed int) error {
 	if confirmed != total {
-		cmd.PrintErrln("WARNING: this plan changes tags on at least one shared runner used by projects outside the evaluated scope:")
+		cmd.PrintErrln("WARNING: this plan changes tags on a runner explicitly assigned to projects outside the evaluated scope:")
 		for _, p := range outOfScopeProjectPaths(plan) {
 			cmd.PrintErrln("  -", p)
 		}
@@ -258,7 +258,7 @@ func confirmApply(cmd *cobra.Command, plan domain.Plan, nonInteractive bool, con
 	cmd.Printf("You are about to execute %d action(s).\n\n", len(plan.Actions))
 	cmd.Printf("Provider: %s\nInstance: %s\nScope:    %s\n\n", plan.Provider, plan.Instance, plan.Scope.Path)
 	if outOfScopePaths := outOfScopeProjectPaths(plan); len(outOfScopePaths) > 0 {
-		cmd.Println("This plan changes tags on a shared runner used by projects OUTSIDE this scope:")
+		cmd.Println("This plan changes tags on a runner explicitly assigned to projects OUTSIDE this scope:")
 		for _, p := range outOfScopePaths {
 			cmd.Println("  -", p)
 		}

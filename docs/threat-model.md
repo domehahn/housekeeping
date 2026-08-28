@@ -192,8 +192,13 @@ malformed, or interacts badly with a project's actual pipeline semantics
 - A document that fails to parse, or whose `default`/job `tags:` value is
   not a list, is reported as a `parse_error` and skipped - never patched
   on a best-effort guess.
+- GitLab's supported two-document `spec:` header form is preserved. Any
+  unrecognized multi-document stream is rejected instead of truncating it.
 - Jobs reachable only through `include:` are never touched; this is
   reported as an explicit warning rather than silently missed.
+- Project protection rules and project identity/path are checked again at
+  execution time. Proposal branches are content-addressed and an existing
+  open MR is reused, making retries after partial failure idempotent.
 
 ### 12. A shared runner tag change affects unrelated projects
 
@@ -202,18 +207,25 @@ changes routing for every other project/group already using that runner,
 if it is shared.
 
 **Mitigations**:
-- Every runner report shows the full blast radius - every project using
-  the runner, split into in-scope and out-of-scope
-  (`domain.Runner.OutOfScopeProjectPaths`) - before any action is taken.
+- GitLab's project-runner endpoint is treated as an availability list, not
+  evidence that a runner actually ran jobs for a project.
+- Explicit project-runner assignments are split into in-scope and
+  out-of-scope paths. Implicit reach is handled by runner type: group runners
+  require their owning group to be covered recursively; inherited ancestor
+  group runners and instance runners fail closed and are omitted from plans.
 - `execute --apply` refuses to run a plan touching a shared runner used
   outside the evaluated scope unless
   `--confirm-out-of-scope-impact=<N>` is passed and matches the plan's
   total out-of-scope project count exactly, in both interactive and
   non-interactive contexts. See
   [ADR 0005](adr/0005-ci-tag-management-scope.md).
-- The Runner API replaces `tag_list` wholesale; this tool always re-reads
-  the current list immediately before writing the union with the desired
-  tag, rather than trusting a stale precomputed list.
+- Execution re-resolves the scope and projects and recomputes runner reach;
+  any changed out-of-scope assignment set requires a new plan.
+- The Runner API replaces `tag_list` wholesale. The adapter performs a final
+  compare immediately before PUT and returns a conflict if another actor
+  changed the tags before that check. GitLab provides no atomic conditional
+  update, so an external change in the narrow GET-to-PUT interval remains a
+  residual risk and must be monitored through GitLab/audit history.
 
 ## Explicitly Out of Scope (for now)
 

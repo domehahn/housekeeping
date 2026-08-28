@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"time"
 
 	"github.com/domehahn/housekeeping/internal/ciyaml"
@@ -14,6 +15,8 @@ import (
 // Executor is the subset of the provider needed to carry out planned
 // actions and revalidate them immediately beforehand.
 type Executor interface {
+	provider.ScopeResolver
+	provider.ProjectReader
 	provider.ProjectGetter
 	provider.ProjectDeleter
 	provider.ProjectArchiver
@@ -24,6 +27,7 @@ type Executor interface {
 	provider.CurrentUserResolver
 	provider.PipelineConfigProposer
 	provider.RunnerTagUpdater
+	provider.RunnerScanner
 }
 
 // ExecuteOptions controls how a plan is carried out.
@@ -90,7 +94,7 @@ func Execute(ctx context.Context, client Executor, plan domain.Plan, opts Execut
 			break
 		}
 
-		outcome := executeOne(ctx, client, action, opts)
+		outcome := executeOne(ctx, client, plan.Scope, action, opts)
 		summary.Outcomes = append(summary.Outcomes, outcome)
 
 		if opts.FailFast && outcome.Result == domain.ResultFailed {
@@ -100,7 +104,7 @@ func Execute(ctx context.Context, client Executor, plan domain.Plan, opts Execut
 	return summary
 }
 
-func executeOne(ctx context.Context, client Executor, action domain.PlannedAction, opts ExecuteOptions) domain.ActionOutcome {
+func executeOne(ctx context.Context, client Executor, scope domain.PlanScope, action domain.PlannedAction, opts ExecuteOptions) domain.ActionOutcome {
 	// Self-protection is unconditional: even an operator who explicitly turns
 	// normal revalidation off must not be able to remove or block the identity
 	// whose token is executing the plan.
@@ -123,7 +127,7 @@ func executeOne(ctx context.Context, client Executor, action domain.PlannedActio
 		return domain.ActionOutcome{Action: action, Result: domain.ResultDryRun, Detail: "simulated (pass --apply to execute)"}
 	}
 
-	detail, err := performAction(ctx, client, action)
+	detail, err := performAction(ctx, client, scope, action)
 	if err == nil {
 		return domain.ActionOutcome{Action: action, Result: domain.ResultSuccess, Detail: detail}
 	}
@@ -150,9 +154,27 @@ func revalidate(ctx context.Context, client Executor, action domain.PlannedActio
 		return revalidateProject(ctx, client, action, opts)
 	case domain.ResourceTypeUser:
 		return revalidateUser(ctx, client, action, opts)
+	case domain.ResourceTypePipelineConfig:
+		return revalidatePipelineProject(ctx, client, action, opts)
 	default:
 		return false, ""
 	}
+}
+
+func revalidatePipelineProject(ctx context.Context, client Executor, action domain.PlannedAction, opts ExecuteOptions) (bool, string) {
+	proj, err := client.GetProject(ctx, action.ResourceID)
+	if err != nil {
+		return true, "project revalidation failed, skipping to be safe: " + err.Error()
+	}
+	if proj.FullPath != action.ResourceName {
+		return true, fmt.Sprintf("project path changed since planning (%q -> %q)", action.ResourceName, proj.FullPath)
+	}
+	if opts.ProjectProtection != nil {
+		if protected, reason := opts.ProjectProtection.IsProtected(proj); protected {
+			return true, reason
+		}
+	}
+	return false, ""
 }
 
 func revalidateProject(ctx context.Context, client Executor, action domain.PlannedAction, opts ExecuteOptions) (skip bool, detail string) {
@@ -243,7 +265,7 @@ func activityChangedSince(ts domain.Timestamp, since time.Time) bool {
 // performAction carries out a single action's mutating call and returns a
 // human-readable detail string for successful outcomes (e.g. a Merge
 // Request URL) alongside the usual error.
-func performAction(ctx context.Context, client Executor, action domain.PlannedAction) (string, error) {
+func performAction(ctx context.Context, client Executor, scope domain.PlanScope, action domain.PlannedAction) (string, error) {
 	switch action.Action {
 	case domain.ActionDeleteProject:
 		return "", client.DeleteProject(ctx, action.ResourceID)
@@ -261,7 +283,7 @@ func performAction(ctx context.Context, client Executor, action domain.PlannedAc
 	case domain.ActionAddPipelineTag:
 		return performPipelineTagAction(ctx, client, action)
 	case domain.ActionAddRunnerTag:
-		return "", performRunnerTagAction(ctx, client, action)
+		return "", performRunnerTagAction(ctx, client, scope, action)
 	default:
 		return "", fmt.Errorf("unsupported action type %q", action.Action)
 	}
@@ -305,7 +327,31 @@ func performPipelineTagAction(ctx context.Context, client Executor, action domai
 // applies the union with the desired tag - the live re-fetch is the
 // revalidation, and an already-present tag is reported as idempotent
 // no-op rather than a redundant API call.
-func performRunnerTagAction(ctx context.Context, client Executor, action domain.PlannedAction) error {
+func performRunnerTagAction(ctx context.Context, client Executor, planScope domain.PlanScope, action domain.PlannedAction) error {
+	scope, _, err := client.ResolveGroupScope(ctx, planScope.Path, planScope.Recursive)
+	if err != nil {
+		return fmt.Errorf("re-resolve runner scope: %w", err)
+	}
+	projects, err := client.ListProjects(ctx, scope)
+	if err != nil {
+		return fmt.Errorf("re-discover projects for runner scope: %w", err)
+	}
+	projectIDs := make([]string, len(projects))
+	for i, p := range projects {
+		projectIDs[i] = p.ID
+	}
+	live, err := client.GetRunnerForProjects(ctx, action.ResourceID, scope, projectIDs)
+	if err != nil {
+		return fmt.Errorf("re-check runner impact: %w", err)
+	}
+	if !live.ImpactKnown {
+		return provider.NewError(provider.KindConflict, "re-check runner impact", live.ImpactReason, nil)
+	}
+	if !sameStrings(live.OutOfScopeProjectPaths, action.OutOfScopeProjectPaths) {
+		return provider.NewError(provider.KindConflict, "re-check runner impact",
+			"runner project scope changed since planning; create and confirm a new plan", nil)
+	}
+
 	current, err := client.GetRunnerTags(ctx, action.ResourceID)
 	if err != nil {
 		return fmt.Errorf("fetch current runner tags: %w", err)
@@ -315,5 +361,12 @@ func performRunnerTagAction(ctx context.Context, client Executor, action domain.
 			return provider.NewError(provider.KindNotFound, "add runner tag", "tag already present", nil)
 		}
 	}
-	return client.UpdateRunnerTags(ctx, action.ResourceID, append(current, action.TagValue))
+	return client.UpdateRunnerTags(ctx, action.ResourceID, current, append(append([]string{}, current...), action.TagValue))
+}
+
+func sameStrings(a, b []string) bool {
+	aCopy, bCopy := append([]string{}, a...), append([]string{}, b...)
+	slices.Sort(aCopy)
+	slices.Sort(bCopy)
+	return slices.Equal(aCopy, bCopy)
 }

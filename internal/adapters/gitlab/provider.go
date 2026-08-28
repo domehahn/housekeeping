@@ -56,15 +56,11 @@ func (a *Adapter) Capabilities(ctx context.Context) (provider.Capabilities, erro
 		BillableMembers: provider.SupportRequiresOwner,
 		UserMemberships: userMemberships,
 		// Opening a Merge Request requires at least Developer on the
-		// project (to push a branch) - reported as requires-owner here
-		// only in the loose sense of "elevated, project-role-dependent
-		// access," not literally the Owner role; see the CLI's `runners`/
-		// `pipelines` help text for the precise requirement.
-		ProposePipelineTags: provider.SupportRequiresOwner,
-		// Updating a runner's tags requires Maintainer+ on a project the
-		// runner is enabled for, or Owner on the runner's owning group for
-		// a shared runner.
-		UpdateRunnerTags: provider.SupportRequiresOwner,
+		// project so the caller can push the proposal branch.
+		ProposePipelineTags: provider.SupportRequiresDeveloper,
+		// GitLab authorizes runner updates through the manage_runner
+		// permission; the role granting it depends on runner ownership.
+		UpdateRunnerTags: provider.SupportRequiresManageRunner,
 	}, nil
 }
 

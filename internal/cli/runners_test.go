@@ -23,7 +23,7 @@ func TestRunnersEvaluate_ReportsOutOfScopeImpact(t *testing.T) {
 	c.scope = domain.Scope{ID: "1", Path: "company"}
 	c.projects = []domain.Project{{ID: "1", FullPath: "company/a"}}
 	c.runners = []domain.Runner{
-		{ID: "500", Description: "shared", Shared: true, OutOfScopeProjectPaths: []string{"other/x"}},
+		{ID: "500", Description: "shared", Shared: true, ImpactKnown: true, OutOfScopeProjectPaths: []string{"other/x"}},
 	}
 	e := withGroup(testEnv(c), "company", false)
 
@@ -56,7 +56,7 @@ func TestRunnersPlan_WritesPlanFile(t *testing.T) {
 	c := newFakeClient()
 	c.scope = domain.Scope{ID: "1", Path: "company"}
 	c.projects = []domain.Project{{ID: "1", FullPath: "company/a"}}
-	c.runners = []domain.Runner{{ID: "500", Description: "shared-runner"}}
+	c.runners = []domain.Runner{{ID: "500", Description: "shared-runner", ImpactKnown: true}}
 	c.info = fakeInfo()
 	e := withGroup(testEnv(c), "company", false)
 

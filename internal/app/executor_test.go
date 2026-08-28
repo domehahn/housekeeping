@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/domehahn/housekeeping/internal/domain"
+	projectpolicy "github.com/domehahn/housekeeping/internal/policy/project"
 	"github.com/domehahn/housekeeping/internal/provider"
 )
 
@@ -31,6 +32,7 @@ type fakeExecutor struct {
 	proposeMRErr      error
 	runnerTags        map[string][]string // runnerID -> current tags
 	updatedRunnerTags map[string][]string
+	runners           map[string]domain.Runner
 }
 
 func newFakeExecutor() *fakeExecutor {
@@ -46,6 +48,7 @@ func newFakeExecutor() *fakeExecutor {
 		proposedMRs:       map[string]string{},
 		runnerTags:        map[string][]string{},
 		updatedRunnerTags: map[string][]string{},
+		runners:           map[string]domain.Runner{},
 	}
 }
 
@@ -69,10 +72,38 @@ func (f *fakeExecutor) GetRunnerTags(_ context.Context, runnerID string) ([]stri
 	return f.runnerTags[runnerID], nil
 }
 
-func (f *fakeExecutor) UpdateRunnerTags(_ context.Context, runnerID string, tags []string) error {
+func (f *fakeExecutor) UpdateRunnerTags(_ context.Context, runnerID string, _ []string, tags []string) error {
 	f.updatedRunnerTags[runnerID] = tags
 	f.runnerTags[runnerID] = tags
 	return nil
+}
+
+func (f *fakeExecutor) ResolveGroupScope(_ context.Context, path string, recursive bool) (domain.Scope, []domain.Group, error) {
+	return domain.Scope{Type: domain.ScopeTypeGroup, ID: "10", Path: path, Recursive: recursive, GroupIDs: []string{"10"}}, nil, nil
+}
+
+func (f *fakeExecutor) ListProjects(context.Context, domain.Scope) ([]domain.Project, error) {
+	projects := make([]domain.Project, 0, len(f.projects))
+	for _, p := range f.projects {
+		projects = append(projects, p)
+	}
+	return projects, nil
+}
+
+func (f *fakeExecutor) ListRunnersForProjects(context.Context, domain.Scope, []string) ([]domain.Runner, error) {
+	runners := make([]domain.Runner, 0, len(f.runners))
+	for _, runner := range f.runners {
+		runners = append(runners, runner)
+	}
+	return runners, nil
+}
+
+func (f *fakeExecutor) GetRunnerForProjects(_ context.Context, runnerID string, _ domain.Scope, _ []string) (domain.Runner, error) {
+	runner, ok := f.runners[runnerID]
+	if !ok {
+		return domain.Runner{}, provider.NewError(provider.KindNotFound, "get runner", "not found", nil)
+	}
+	return runner, nil
 }
 
 func (f *fakeExecutor) GetProject(_ context.Context, id string) (domain.Project, error) {
@@ -288,6 +319,7 @@ func TestExecute_UserRemoveFromGroupRequiresGroupID(t *testing.T) {
 
 func TestExecute_AddPipelineTag_OpensMergeRequest(t *testing.T) {
 	f := newFakeExecutor()
+	f.projects["1"] = domain.Project{ID: "1"}
 	f.ciFiles["1"] = []byte("build-job:\n  script: [\"echo hi\"]\n")
 	f.proposeMRURL = "https://gitlab.example.com/group/proj/-/merge_requests/42"
 
@@ -309,6 +341,7 @@ func TestExecute_AddPipelineTag_OpensMergeRequest(t *testing.T) {
 
 func TestExecute_AddPipelineTag_AlreadyPresentIsIdempotent(t *testing.T) {
 	f := newFakeExecutor()
+	f.projects["1"] = domain.Project{ID: "1"}
 	f.ciFiles["1"] = []byte("default:\n  tags:\n    - k8s-runner\n\nbuild-job:\n  script: [\"echo hi\"]\n")
 
 	p := domain.Plan{Actions: []domain.PlannedAction{
@@ -326,6 +359,7 @@ func TestExecute_AddPipelineTag_AlreadyPresentIsIdempotent(t *testing.T) {
 
 func TestExecute_AddPipelineTag_MissingCIFileIsIdempotent(t *testing.T) {
 	f := newFakeExecutor() // no ciFiles entry for project "1"
+	f.projects["1"] = domain.Project{ID: "1"}
 
 	p := domain.Plan{Actions: []domain.PlannedAction{
 		{ResourceType: domain.ResourceTypePipelineConfig, ResourceID: "1", Action: domain.ActionAddPipelineTag, TagValue: "k8s-runner", EvaluatedAt: time.Now()},
@@ -339,6 +373,7 @@ func TestExecute_AddPipelineTag_MissingCIFileIsIdempotent(t *testing.T) {
 
 func TestExecute_AddPipelineTag_DryRunNeverOpensMergeRequest(t *testing.T) {
 	f := newFakeExecutor()
+	f.projects["1"] = domain.Project{ID: "1"}
 	f.ciFiles["1"] = []byte("build-job:\n  script: [\"echo hi\"]\n")
 
 	p := domain.Plan{Actions: []domain.PlannedAction{
@@ -354,11 +389,31 @@ func TestExecute_AddPipelineTag_DryRunNeverOpensMergeRequest(t *testing.T) {
 	}
 }
 
+func TestExecute_AddPipelineTag_RechecksProjectProtection(t *testing.T) {
+	f := newFakeExecutor()
+	f.projects["1"] = domain.Project{ID: "1", FullPath: "group/protected"}
+	f.ciFiles["1"] = []byte("build-job:\n  script: [\"echo hi\"]\n")
+	protection, err := projectpolicy.NewProtection([]string{"group/protected"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := domain.Plan{Actions: []domain.PlannedAction{{
+		ResourceType: domain.ResourceTypePipelineConfig, ResourceID: "1", ResourceName: "group/protected",
+		Action: domain.ActionAddPipelineTag, TagValue: "k8s-runner", EvaluatedAt: time.Now(),
+	}}}
+	summary := Execute(context.Background(), f, p, ExecuteOptions{Apply: true, Revalidate: true, ProjectProtection: protection})
+	if summary.Outcomes[0].Result != domain.ResultSkippedRevalidate || len(f.proposedMRs) != 0 {
+		t.Fatalf("live protection must block the proposal, got %+v", summary.Outcomes[0])
+	}
+}
+
 func TestExecute_AddRunnerTag_UpdatesTagList(t *testing.T) {
 	f := newFakeExecutor()
+	f.projects["1"] = domain.Project{ID: "1", FullPath: "group/project"}
+	f.runners["5"] = domain.Runner{ID: "5", ImpactKnown: true, InScopeProjectPaths: []string{"group/project"}}
 	f.runnerTags["5"] = []string{"existing-tag"}
 
-	p := domain.Plan{Actions: []domain.PlannedAction{
+	p := domain.Plan{Scope: domain.PlanScope{Path: "group", Recursive: true}, Actions: []domain.PlannedAction{
 		{ResourceType: domain.ResourceTypeRunner, ResourceID: "5", Action: domain.ActionAddRunnerTag, TagValue: "k8s-runner", EvaluatedAt: time.Now()},
 	}}
 	summary := Execute(context.Background(), f, p, ExecuteOptions{Apply: true, Revalidate: true})
@@ -374,9 +429,11 @@ func TestExecute_AddRunnerTag_UpdatesTagList(t *testing.T) {
 
 func TestExecute_AddRunnerTag_AlreadyPresentIsIdempotent(t *testing.T) {
 	f := newFakeExecutor()
+	f.projects["1"] = domain.Project{ID: "1", FullPath: "group/project"}
+	f.runners["5"] = domain.Runner{ID: "5", ImpactKnown: true, InScopeProjectPaths: []string{"group/project"}}
 	f.runnerTags["5"] = []string{"k8s-runner"}
 
-	p := domain.Plan{Actions: []domain.PlannedAction{
+	p := domain.Plan{Scope: domain.PlanScope{Path: "group", Recursive: true}, Actions: []domain.PlannedAction{
 		{ResourceType: domain.ResourceTypeRunner, ResourceID: "5", Action: domain.ActionAddRunnerTag, TagValue: "k8s-runner", EvaluatedAt: time.Now()},
 	}}
 	summary := Execute(context.Background(), f, p, ExecuteOptions{Apply: true, Revalidate: true})
@@ -386,5 +443,23 @@ func TestExecute_AddRunnerTag_AlreadyPresentIsIdempotent(t *testing.T) {
 	}
 	if summary.Outcomes[0].Result != domain.ResultSkippedAlreadyDone {
 		t.Errorf("expected ResultSkippedAlreadyDone, got %v: %s", summary.Outcomes[0].Result, summary.Outcomes[0].Detail)
+	}
+}
+
+func TestExecute_AddRunnerTag_RejectsChangedLiveImpact(t *testing.T) {
+	f := newFakeExecutor()
+	f.projects["1"] = domain.Project{ID: "1", FullPath: "group/project"}
+	f.runners["5"] = domain.Runner{
+		ID: "5", ImpactKnown: true, InScopeProjectPaths: []string{"group/project"},
+		OutOfScopeProjectPaths: []string{"other/new"},
+	}
+	f.runnerTags["5"] = []string{"existing"}
+	p := domain.Plan{Scope: domain.PlanScope{Path: "group", Recursive: true}, Actions: []domain.PlannedAction{{
+		ResourceType: domain.ResourceTypeRunner, ResourceID: "5", Action: domain.ActionAddRunnerTag,
+		TagValue: "k8s-runner", EvaluatedAt: time.Now(),
+	}}}
+	summary := Execute(context.Background(), f, p, ExecuteOptions{Apply: true, Revalidate: true})
+	if summary.Outcomes[0].Result != domain.ResultFailed || len(f.updatedRunnerTags) != 0 {
+		t.Fatalf("changed runner reach must require a new plan, got %+v", summary.Outcomes[0])
 	}
 }

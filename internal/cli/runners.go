@@ -14,17 +14,18 @@ import (
 func newRunnersCmd(e *env) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "runners",
-		Short: "Discover, evaluate, and plan CI tag additions to the runners used by a scope",
-		Long: `runners manages adding a CI tag directly to the tag_list of runners used by
+		Short: "Discover, evaluate, and plan CI tag additions to runners available to a scope",
+		Long: `runners manages adding a CI tag directly to the tag_list of runners available to
 projects in a scope (via the GitLab Runner API), as opposed to
 "pipelines", which edits .gitlab-ci.yml files.
 
-If a runner is SHARED, changing its tags can affect projects outside the
-evaluated scope. Every command here reports that "blast radius" (the
-out-of-scope projects using each runner), and "execute --apply" refuses
-to proceed on a plan touching a shared runner used outside scope unless
-you pass --confirm-out-of-scope-impact=<N> matching the exact total -
-see docs/adr/0005-ci-tag-management-scope.md.`,
+Project-runner assignments can be enumerated explicitly. Group runners are
+actionable only when the owning group is inside a recursive scope; inherited
+ancestor-group runners, instance runners, and any runner whose effective reach
+cannot be proven are reported as blocked and omitted from plans. Explicit
+out-of-scope project assignments additionally require
+--confirm-out-of-scope-impact=<N> at execution time. See
+docs/adr/0005-ci-tag-management-scope.md.`,
 	}
 	cmd.AddCommand(newRunnersListCmd(e), newRunnersEvaluateCmd(e), newRunnersPlanCmd(e))
 	return cmd
@@ -33,7 +34,7 @@ see docs/adr/0005-ci-tag-management-scope.md.`,
 func newRunnersListCmd(e *env) *cobra.Command {
 	return &cobra.Command{
 		Use:   "list",
-		Short: "List runners used by projects in scope, with their tags and blast radius",
+		Short: "List runners available to projects in scope, with tags and impact status",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			client, err := e.requireClient()
 			if err != nil {
@@ -53,7 +54,7 @@ func newRunnersListCmd(e *env) *cobra.Command {
 				return wrapProviderErr(err)
 			}
 
-			runners, err := client.ListRunnersForProjects(ctx, projectIDs(projects))
+			runners, err := client.ListRunnersForProjects(ctx, scope, projectIDs(projects))
 			if err != nil {
 				return wrapProviderErr(err)
 			}
@@ -61,14 +62,14 @@ func newRunnersListCmd(e *env) *cobra.Command {
 			rows := make([][]string, 0, len(runners))
 			for _, r := range runners {
 				rows = append(rows, []string{
-					r.ID, r.Description, sharedStr(r.Shared), joinReasons(r.TagList),
-					fmt.Sprintf("%d", len(r.OutOfScopeProjectPaths)),
+					r.ID, r.Description, r.RunnerType, sharedStr(r.Shared), joinReasons(r.TagList),
+					fmt.Sprintf("%d", len(r.OutOfScopeProjectPaths)), impactKnownStr(r),
 				})
 			}
 			table := output.Table{
-				Headers: []string{"ID", "Description", "Shared", "Tags", "Out-of-Scope Projects"},
+				Headers: []string{"ID", "Description", "Type", "Shared", "Tags", "Out-of-Scope Projects", "Impact"},
 				Rows:    rows,
-				Footer:  fmt.Sprintf("%d runner(s) used by projects in %s", len(runners), scope.Path),
+				Footer:  fmt.Sprintf("%d runner(s) available to projects in %s", len(runners), scope.Path),
 			}
 			return output.Render(cmd.OutOrStdout(), e.format, table, runners)
 		},
@@ -79,7 +80,7 @@ func newRunnersEvaluateCmd(e *env) *cobra.Command {
 	var tag string
 	cmd := &cobra.Command{
 		Use:   "evaluate",
-		Short: "Check runners used by a scope for a CI tag, without producing a plan",
+		Short: "Check runners available to a scope for a CI tag, without producing a plan",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if tag == "" {
 				return exitErr(ExitInvalidConfiguration, fmt.Errorf("--tag is required"))
@@ -170,7 +171,7 @@ func runRunnerTagEvaluation(cmd *cobra.Command, e *env, client provider.Client, 
 		return app.RunnerTagEvaluationSummary{}, domain.Scope{}, wrapProviderErr(err)
 	}
 
-	summary, err := app.EvaluateRunnerTags(ctx, client, projectIDs(projects), tag)
+	summary, err := app.EvaluateRunnerTags(ctx, client, scope, projectIDs(projects), tag)
 	if err != nil {
 		return app.RunnerTagEvaluationSummary{}, domain.Scope{}, wrapProviderErr(err)
 	}
@@ -189,15 +190,22 @@ func projectIDs(projects []domain.Project) []string {
 
 func renderRunnerTagEvaluation(cmd *cobra.Command, e *env, scope domain.Scope, summary app.RunnerTagEvaluationSummary) error {
 	matched := summary.Matched()
-	rows := make([][]string, 0, len(matched))
-	for _, m := range matched {
+	rows := make([][]string, 0, len(summary.Results))
+	for _, m := range summary.Results {
+		if !m.Missing {
+			continue
+		}
+		status := "actionable"
+		if m.Blocked {
+			status = "blocked"
+		}
 		rows = append(rows, []string{
 			m.Runner.ID, m.Runner.Description, sharedStr(m.Runner.Shared),
-			fmt.Sprintf("%d", len(m.Runner.OutOfScopeProjectPaths)), joinReasons(m.Reasons),
+			status, fmt.Sprintf("%d", len(m.Runner.OutOfScopeProjectPaths)), joinReasons(m.Reasons),
 		})
 	}
 	table := output.Table{
-		Headers: []string{"ID", "Description", "Shared", "Out-of-Scope Projects", "Reasons"},
+		Headers: []string{"ID", "Description", "Shared", "Status", "Out-of-Scope Projects", "Reasons"},
 		Rows:    rows,
 		Footer: fmt.Sprintf("Evaluated %d, matched %d, total out-of-scope impact %d, in scope %s",
 			summary.Discovered(), len(matched), summary.TotalOutOfScopeImpact(), scope.Path),
@@ -210,4 +218,11 @@ func sharedStr(b bool) string {
 		return "yes"
 	}
 	return "no"
+}
+
+func impactKnownStr(r domain.Runner) string {
+	if r.ImpactKnown {
+		return "known"
+	}
+	return "blocked: " + r.ImpactReason
 }

@@ -7,11 +7,13 @@ package provider
 type Support string
 
 const (
-	SupportSupported     Support = "supported"
-	SupportUnsupported   Support = "unsupported"
-	SupportRequiresAdmin Support = "requires-admin"
-	SupportRequiresOwner Support = "requires-owner"
-	SupportUnknown       Support = "unknown"
+	SupportSupported            Support = "supported"
+	SupportUnsupported          Support = "unsupported"
+	SupportRequiresAdmin        Support = "requires-admin"
+	SupportRequiresOwner        Support = "requires-owner"
+	SupportRequiresDeveloper    Support = "requires-developer"
+	SupportRequiresManageRunner Support = "requires-manage-runner-permission"
+	SupportUnknown              Support = "unknown"
 )
 
 // Capabilities reports what an adapter can actually do against the

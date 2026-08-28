@@ -2,10 +2,14 @@ package gitlab
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/domehahn/housekeeping/internal/domain"
+	"github.com/domehahn/housekeeping/internal/provider"
 )
 
 func TestListRunnersForProjects_DedupAndBlastRadius(t *testing.T) {
@@ -17,7 +21,7 @@ func TestListRunnersForProjects_DedupAndBlastRadius(t *testing.T) {
 			writeJSON(t, w, []map[string]any{{"id": 100, "description": "shared-runner"}}) // same runner, seen again
 		case strings.HasSuffix(r.URL.Path, "/runners/100"):
 			writeJSON(t, w, map[string]any{
-				"id": 100, "description": "shared-runner", "is_shared": true,
+				"id": 100, "description": "shared-runner", "is_shared": true, "runner_type": "project_type",
 				"tag_list": []string{"existing-tag"},
 				"projects": []map[string]any{
 					{"id": 1, "path_with_namespace": "group/in-scope-a"},
@@ -30,7 +34,8 @@ func TestListRunnersForProjects_DedupAndBlastRadius(t *testing.T) {
 		}
 	})
 
-	runners, err := a.ListRunnersForProjects(context.Background(), []string{"1", "2"})
+	scope := domain.Scope{Type: domain.ScopeTypeGroup, ID: "10", GroupIDs: []string{"10"}, Recursive: true}
+	runners, err := a.ListRunnersForProjects(context.Background(), scope, []string{"1", "2"})
 	if err != nil {
 		t.Fatalf("ListRunnersForProjects: %v", err)
 	}
@@ -40,6 +45,9 @@ func TestListRunnersForProjects_DedupAndBlastRadius(t *testing.T) {
 	r := runners[0]
 	if !r.Shared {
 		t.Error("expected Shared=true")
+	}
+	if !r.ImpactKnown {
+		t.Errorf("expected project runner impact to be known, reason=%q", r.ImpactReason)
 	}
 	if len(r.InScopeProjectPaths) != 2 {
 		t.Errorf("expected 2 in-scope projects, got %v", r.InScopeProjectPaths)
@@ -67,15 +75,15 @@ func TestListRunnersForProjects_Pagination(t *testing.T) {
 			}
 			writeJSON(t, w, pages[idx])
 		case strings.Contains(r.URL.Path, "/runners/100"):
-			writeJSON(t, w, map[string]any{"id": 100, "tag_list": []string{}})
+			writeJSON(t, w, map[string]any{"id": 100, "runner_type": "project_type", "tag_list": []string{}, "projects": []map[string]any{{"id": 1, "path_with_namespace": "group/a"}}})
 		case strings.Contains(r.URL.Path, "/runners/200"):
-			writeJSON(t, w, map[string]any{"id": 200, "tag_list": []string{}})
+			writeJSON(t, w, map[string]any{"id": 200, "runner_type": "project_type", "tag_list": []string{}, "projects": []map[string]any{{"id": 1, "path_with_namespace": "group/a"}}})
 		default:
 			t.Fatalf("unexpected path: %s", r.URL.Path)
 		}
 	})
 
-	runners, err := a.ListRunnersForProjects(context.Background(), []string{"1"})
+	runners, err := a.ListRunnersForProjects(context.Background(), domain.Scope{}, []string{"1"})
 	if err != nil {
 		t.Fatalf("ListRunnersForProjects: %v", err)
 	}
@@ -102,12 +110,16 @@ func TestUpdateRunnerTags(t *testing.T) {
 	var gotBody []byte
 	a := newTestAdapter(t, func(w http.ResponseWriter, r *http.Request) {
 		gotMethod, gotPath = r.Method, r.URL.Path
+		if r.Method == http.MethodGet {
+			writeJSON(t, w, map[string]any{"id": 5, "tag_list": []string{"a"}})
+			return
+		}
 		buf := make([]byte, r.ContentLength)
 		_, _ = r.Body.Read(buf)
 		gotBody = buf
 		writeJSON(t, w, map[string]any{"id": 5, "tag_list": []string{"a", "b"}})
 	})
-	if err := a.UpdateRunnerTags(context.Background(), "5", []string{"a", "b"}); err != nil {
+	if err := a.UpdateRunnerTags(context.Background(), "5", []string{"a"}, []string{"a", "b"}); err != nil {
 		t.Fatalf("UpdateRunnerTags: %v", err)
 	}
 	if gotMethod != http.MethodPut {
@@ -118,5 +130,65 @@ func TestUpdateRunnerTags(t *testing.T) {
 	}
 	if !strings.Contains(string(gotBody), "tag_list") {
 		t.Errorf("expected request body to contain tag_list, got %s", gotBody)
+	}
+}
+
+func TestUpdateRunnerTags_RejectsConcurrentTagChange(t *testing.T) {
+	putCalled := false
+	a := newTestAdapter(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPut {
+			putCalled = true
+		}
+		writeJSON(t, w, map[string]any{"id": 5, "tag_list": []string{"a", "concurrent"}})
+	})
+	err := a.UpdateRunnerTags(context.Background(), "5", []string{"a"}, []string{"a", "wanted"})
+	var pErr *provider.Error
+	if !errors.As(err, &pErr) || pErr.Kind != provider.KindConflict {
+		t.Fatalf("expected conflict, got %v", err)
+	}
+	if putCalled {
+		t.Fatal("must not overwrite tags after a concurrent change")
+	}
+}
+
+func TestAssessRunnerImpact_GroupRunnerRequiresOwningRecursiveScope(t *testing.T) {
+	tests := []struct {
+		name   string
+		scope  domain.Scope
+		runner domain.Runner
+		known  bool
+	}{
+		{
+			name:   "owning recursive scope is safe",
+			scope:  domain.Scope{Recursive: true, GroupIDs: []string{"10", "11"}},
+			runner: domain.Runner{RunnerType: "group_type", OwnerGroupIDs: []string{"11"}},
+			known:  true,
+		},
+		{
+			name:   "non-recursive scope is incomplete",
+			scope:  domain.Scope{Recursive: false, GroupIDs: []string{"10"}},
+			runner: domain.Runner{RunnerType: "group_type", OwnerGroupIDs: []string{"10"}},
+		},
+		{
+			name:   "inherited ancestor is outside scope",
+			scope:  domain.Scope{Recursive: true, GroupIDs: []string{"11"}},
+			runner: domain.Runner{RunnerType: "group_type", OwnerGroupIDs: []string{"10"}},
+		},
+		{
+			name:   "instance runner is unbounded",
+			scope:  domain.Scope{Recursive: true, GroupIDs: []string{"10"}},
+			runner: domain.Runner{RunnerType: "instance_type"},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			assessRunnerImpact(&tc.runner, tc.scope)
+			if tc.runner.ImpactKnown != tc.known {
+				t.Fatalf("ImpactKnown=%v, want %v (reason=%q)", tc.runner.ImpactKnown, tc.known, tc.runner.ImpactReason)
+			}
+			if !tc.known && tc.runner.ImpactReason == "" {
+				t.Fatal("blocked runner must explain why its impact is unprovable")
+			}
+		})
 	}
 }

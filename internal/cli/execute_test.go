@@ -134,6 +134,8 @@ func TestExecute_SafetyGuardBlocksOversizedPlan(t *testing.T) {
 func TestExecute_RunnerActionRequiresOutOfScopeConfirmation(t *testing.T) {
 	c := newFakeClient()
 	c.info = fakeInfo()
+	c.projects = []domain.Project{{ID: "1", FullPath: "company/a"}}
+	c.runners = []domain.Runner{{ID: "500", Description: "shared", ImpactKnown: true, InScopeProjectPaths: []string{"company/a"}, OutOfScopeProjectPaths: []string{"other/x", "other/y"}}}
 	c.runnerTags["500"] = []string{}
 	e := testEnv(c)
 

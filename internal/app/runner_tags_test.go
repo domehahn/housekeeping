@@ -12,17 +12,21 @@ type fakeRunnerScanner struct {
 	err     error
 }
 
-func (f *fakeRunnerScanner) ListRunnersForProjects(context.Context, []string) ([]domain.Runner, error) {
+func (f *fakeRunnerScanner) ListRunnersForProjects(context.Context, domain.Scope, []string) ([]domain.Runner, error) {
 	return f.runners, f.err
+}
+
+func (f *fakeRunnerScanner) GetRunnerForProjects(context.Context, string, domain.Scope, []string) (domain.Runner, error) {
+	return domain.Runner{}, nil
 }
 
 func TestEvaluateRunnerTags_MatchesMissingTag(t *testing.T) {
 	scanner := &fakeRunnerScanner{runners: []domain.Runner{
-		{ID: "1", TagList: []string{"other-tag"}},
-		{ID: "2", TagList: []string{"k8s-runner"}},
+		{ID: "1", TagList: []string{"other-tag"}, ImpactKnown: true},
+		{ID: "2", TagList: []string{"k8s-runner"}, ImpactKnown: true},
 	}}
 
-	summary, err := EvaluateRunnerTags(context.Background(), scanner, []string{"p1"}, "k8s-runner")
+	summary, err := EvaluateRunnerTags(context.Background(), scanner, domain.Scope{}, []string{"p1"}, "k8s-runner")
 	if err != nil {
 		t.Fatalf("EvaluateRunnerTags: %v", err)
 	}
@@ -34,11 +38,11 @@ func TestEvaluateRunnerTags_MatchesMissingTag(t *testing.T) {
 
 func TestEvaluateRunnerTags_OutOfScopeImpactSummed(t *testing.T) {
 	scanner := &fakeRunnerScanner{runners: []domain.Runner{
-		{ID: "1", Shared: true, OutOfScopeProjectPaths: []string{"a/x", "a/y"}},
-		{ID: "2", Shared: true, OutOfScopeProjectPaths: []string{"b/z"}},
+		{ID: "1", Shared: true, ImpactKnown: true, OutOfScopeProjectPaths: []string{"a/x", "a/y"}},
+		{ID: "2", Shared: true, ImpactKnown: true, OutOfScopeProjectPaths: []string{"b/z"}},
 	}}
 
-	summary, err := EvaluateRunnerTags(context.Background(), scanner, []string{"p1"}, "k8s-runner")
+	summary, err := EvaluateRunnerTags(context.Background(), scanner, domain.Scope{}, []string{"p1"}, "k8s-runner")
 	if err != nil {
 		t.Fatalf("EvaluateRunnerTags: %v", err)
 	}
@@ -49,10 +53,10 @@ func TestEvaluateRunnerTags_OutOfScopeImpactSummed(t *testing.T) {
 
 func TestEvaluateRunnerTags_NoOutOfScopeImpactForDedicatedRunner(t *testing.T) {
 	scanner := &fakeRunnerScanner{runners: []domain.Runner{
-		{ID: "1", Shared: false, InScopeProjectPaths: []string{"a/x"}},
+		{ID: "1", Shared: false, ImpactKnown: true, InScopeProjectPaths: []string{"a/x"}},
 	}}
 
-	summary, err := EvaluateRunnerTags(context.Background(), scanner, []string{"p1"}, "k8s-runner")
+	summary, err := EvaluateRunnerTags(context.Background(), scanner, domain.Scope{}, []string{"p1"}, "k8s-runner")
 	if err != nil {
 		t.Fatalf("EvaluateRunnerTags: %v", err)
 	}
@@ -63,8 +67,21 @@ func TestEvaluateRunnerTags_NoOutOfScopeImpactForDedicatedRunner(t *testing.T) {
 
 func TestEvaluateRunnerTags_PropagatesScannerError(t *testing.T) {
 	scanner := &fakeRunnerScanner{err: errFakeFetch{}}
-	_, err := EvaluateRunnerTags(context.Background(), scanner, []string{"p1"}, "k8s-runner")
+	_, err := EvaluateRunnerTags(context.Background(), scanner, domain.Scope{}, []string{"p1"}, "k8s-runner")
 	if err == nil {
 		t.Fatal("expected an error to propagate")
+	}
+}
+
+func TestEvaluateRunnerTags_BlocksRunnerWithUnprovableImpact(t *testing.T) {
+	scanner := &fakeRunnerScanner{runners: []domain.Runner{{
+		ID: "1", RunnerType: "instance_type", ImpactReason: "instance-wide impact",
+	}}}
+	summary, err := EvaluateRunnerTags(context.Background(), scanner, domain.Scope{}, []string{"p1"}, "k8s-runner")
+	if err != nil {
+		t.Fatalf("EvaluateRunnerTags: %v", err)
+	}
+	if len(summary.Results) != 1 || !summary.Results[0].Blocked || len(summary.Matched()) != 0 {
+		t.Fatalf("expected the unsafe runner to be visible but not actionable, got %+v", summary)
 	}
 }

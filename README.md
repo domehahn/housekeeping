@@ -255,17 +255,20 @@ Documented exit codes:
   (for users) protected access levels (e.g. always protect Owners) and
   automatic protection of the token's own identity
   (`exclude_current_user: true`).
-- **Out-of-scope impact confirmation** (`runners` only): `execute --apply`
-  refuses to touch a shared runner used by projects outside the evaluated
-  scope unless `--confirm-out-of-scope-impact=<N>` matches the plan's
-  total exactly, in both interactive and non-interactive contexts - see
+- **Runner reach proof** (`runners` only): project-runner assignments are
+  enumerated; a group runner is actionable only from its owning group with
+  `--recursive`. Inherited ancestor-group runners, instance runners, and
+  otherwise unprovable reach are blocked and omitted from plans. Explicit
+  assignments outside the scope additionally require
+  `--confirm-out-of-scope-impact=<N>` matching the plan total - see
   [§25](#25-runner-tag-cleanup) and
   [ADR 0005](docs/adr/0005-ci-tag-management-scope.md).
 - **Plan integrity**: SHA-256 hash + provider/instance verification (see
   above).
-- **Revalidation** before each destructive call - for pipeline/runner tag
-  actions this is structural: the live file/tag-list is always re-fetched
-  immediately before acting, so a stale plan can never apply a stale diff.
+- **Revalidation** before each destructive call - pipeline protection and
+  the live CI file are checked again; runner scope, project assignments and
+  tag lists are checked again. A changed runner reach or concurrent tag edit
+  fails rather than overwriting live state.
 - **Unknown activity is never a match by default** (see below).
 
 ## 13. Project cleanup
@@ -554,6 +557,9 @@ Highlights:
   own is left alone by design, and jobs defined only via `include:` from
   another file/project are never inspected - see
   [ADR 0005](docs/adr/0005-ci-tag-management-scope.md).
+- **GitLab CI header documents are preserved.** Files using a leading
+  `spec:` header separated from the CI configuration by `---` are decoded
+  and re-encoded as two documents; other multi-document streams fail closed.
 - **Regex ReDoS**: not specifically mitigated beyond relying on Go's RE2-
   derived `regexp` package, which has linear-time matching guarantees
   regardless of pattern shape.
@@ -571,6 +577,10 @@ that already defines its own `tags:` list. A job with no `tags:` of its
 own is left alone - it already inherits from `default:`. Changes are
 **never** committed directly: `execute --apply` opens one Merge Request
 per affected project; nothing merges it automatically.
+
+Proposal branches include a digest of the patched content. Re-running after
+a partial failure reuses the matching branch and open Merge Request instead
+of becoming permanently stuck on a branch-name conflict.
 
 ```bash
 scm-cleaner pipelines evaluate --group company --recursive --tag k8s-runner
@@ -591,15 +601,18 @@ reason rather than silently missing them. See
 
 ## 25. Runner tag cleanup
 
-Adds a CI tag directly to the `tag_list` of runners used by projects in
-scope, via the GitLab Runner API - as opposed to §24, which edits
-`.gitlab-ci.yml` files. If a runner is **shared**, this can affect
-projects *outside* the scope you evaluated. Every report shows that blast
-radius explicitly:
+Adds a CI tag directly to the `tag_list` of runners **available to** projects
+in scope, via the GitLab Runner API - as opposed to §24, which edits
+`.gitlab-ci.yml` files. GitLab's project endpoint also returns inherited group
+and instance runners, so availability does not prove actual job usage.
 
 ```bash
 scm-cleaner runners list --group company --recursive
 scm-cleaner runners evaluate --group company --recursive --tag k8s-runner
+
+# Target one subgroup and all projects in its descendant subgroups:
+scm-cleaner runners evaluate \
+  --group company/platform/subgroup --recursive --tag k8s-runner
 
 scm-cleaner runners plan \
   --group company --recursive --tag k8s-runner \
@@ -611,10 +624,21 @@ scm-cleaner execute runner-tags.json --apply --non-interactive \
   --confirm-out-of-scope-impact 3                    # must equal the plan's total exactly
 ```
 
-`--confirm-out-of-scope-impact` is required (in both interactive and
-non-interactive contexts) whenever a plan touches a shared runner used
-outside the evaluated scope; `execute` prints every affected out-of-scope
-project path so you can actually look at them before confirming. See
+For a subgroup scope, project runners explicitly assigned to its projects are
+eligible. A group runner owned by that subgroup is eligible only with
+`--recursive`, because it is implicitly available to descendant subgroups.
+A runner inherited from a parent group is shown as `blocked`; target the
+owning parent group with `--recursive` if that wider change is intended.
+Instance runners are blocked because a group-scoped query cannot prove their
+instance-wide reach.
+
+`--confirm-out-of-scope-impact` is required whenever an eligible runner has
+explicit project assignments outside the evaluated scope. `execute` prints
+those paths and, immediately before updating, re-resolves the group, projects,
+runner reach, and current tags. A changed reach requires a new plan; a
+tag edit detected by the final preflight check is not overwritten. GitLab
+does not expose an atomic compare-and-swap for the subsequent PUT, so a very
+narrow external race remains. See
 [ADR 0005](docs/adr/0005-ci-tag-management-scope.md).
 
 ## 26. Roadmap

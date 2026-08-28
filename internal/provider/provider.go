@@ -108,12 +108,12 @@ type PipelineConfigProposer interface {
 	ProposePipelineTagChange(ctx context.Context, projectID string, patchedContent []byte, tag string) (mergeRequestURL string, err error)
 }
 
-// RunnerScanner lists the runners used by a set of projects, with full
-// blast-radius information: every project using each runner, not just the
-// ones passed in, so shared-runner impact outside the evaluated scope is
-// never hidden.
+// RunnerScanner lists runners available to a set of projects. Results include
+// explicit project assignments and whether the runner's complete effective
+// reach can be proven inside the supplied scope.
 type RunnerScanner interface {
-	ListRunnersForProjects(ctx context.Context, projectIDs []string) ([]domain.Runner, error)
+	ListRunnersForProjects(ctx context.Context, scope domain.Scope, projectIDs []string) ([]domain.Runner, error)
+	GetRunnerForProjects(ctx context.Context, runnerID string, scope domain.Scope, projectIDs []string) (domain.Runner, error)
 }
 
 // RunnerTagUpdater reads and updates a runner's tag list. The update call
@@ -121,7 +121,7 @@ type RunnerScanner interface {
 // fetch the current list first, compute the desired union, and pass that.
 type RunnerTagUpdater interface {
 	GetRunnerTags(ctx context.Context, runnerID string) ([]string, error)
-	UpdateRunnerTags(ctx context.Context, runnerID string, tags []string) error
+	UpdateRunnerTags(ctx context.Context, runnerID string, expectedTags, tags []string) error
 }
 
 // CurrentUserResolver identifies the authenticated caller so it can be

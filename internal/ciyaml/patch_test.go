@@ -1,6 +1,8 @@
 package ciyaml
 
 import (
+	"bytes"
+	"io"
 	"strings"
 	"testing"
 
@@ -300,6 +302,71 @@ func TestAddTag_SecondCallIsFullyIdempotent(t *testing.T) {
 	}
 	if string(second) != string(first) {
 		t.Error("expected the second call's output to be byte-identical to the first call's output")
+	}
+}
+
+func TestAddTag_PreservesGitLabSpecHeaderAndPatchesConfigurationDocument(t *testing.T) {
+	content := []byte(`spec:
+  inputs:
+    environment:
+      default: test
+---
+build-job:
+  tags:
+    - existing
+  script: ["echo hi"]
+`)
+
+	patched, changes, err := AddTag(content, "k8s-runner")
+	if err != nil {
+		t.Fatalf("AddTag: %v", err)
+	}
+	if len(changes) != 2 {
+		t.Fatalf("expected default and job changes, got %+v", changes)
+	}
+
+	dec := yaml.NewDecoder(bytes.NewReader(patched))
+	var header, config map[string]any
+	if err := dec.Decode(&header); err != nil {
+		t.Fatalf("decode header: %v", err)
+	}
+	if err := dec.Decode(&config); err != nil {
+		t.Fatalf("decode config: %v", err)
+	}
+	var extra any
+	if err := dec.Decode(&extra); err != io.EOF {
+		t.Fatalf("expected exactly two documents, got %v", err)
+	}
+	if _, ok := header["spec"]; !ok {
+		t.Fatalf("spec header was lost: %#v", header)
+	}
+	if got := tagsOf(t, config, "default", "tags"); !contains(got, "k8s-runner") {
+		t.Errorf("expected config default.tags to be patched, got %v", got)
+	}
+	if got := tagsOf(t, config, "build-job", "tags"); !contains(got, "k8s-runner") {
+		t.Errorf("expected build-job.tags to be patched, got %v", got)
+	}
+
+	second, secondChanges, err := AddTag(patched, "k8s-runner")
+	if err != nil {
+		t.Fatalf("second AddTag: %v", err)
+	}
+	if len(secondChanges) != 0 || !bytes.Equal(second, patched) {
+		t.Fatal("expected the second multi-document patch to be byte-identical")
+	}
+}
+
+func TestAddTag_RejectsUnrecognizedMultiDocumentStream(t *testing.T) {
+	_, _, err := AddTag([]byte("one: value\n---\ntwo: value\n"), "k8s-runner")
+	if err == nil || !strings.Contains(err.Error(), "spec") {
+		t.Fatalf("expected a spec-header error, got %v", err)
+	}
+}
+
+func TestHasIncludes_InGitLabConfigurationDocument(t *testing.T) {
+	content := []byte("spec:\n  inputs: {}\n---\ninclude:\n  - local: common.yml\n")
+	if !HasIncludes(content) {
+		t.Fatal("expected include in the configuration document to be detected")
 	}
 }
 
