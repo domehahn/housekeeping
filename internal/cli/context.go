@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 	"os"
@@ -11,12 +12,13 @@ import (
 	"github.com/domehahn/housekeeping/internal/output"
 	"github.com/domehahn/housekeeping/internal/provider"
 	"github.com/domehahn/housekeeping/internal/providerfactory"
+	"github.com/domehahn/housekeeping/internal/secrets"
 )
 
 // globalFlags holds every persistent (root-level) CLI flag. Values here
 // take precedence over the config file, per the documented configuration
 // hierarchy: Default < Config File < CLI Flags. Secret values are resolved
-// separately from their configured environment variable.
+// separately from their configured reference.
 type globalFlags struct {
 	configPath string
 	output     string
@@ -37,11 +39,13 @@ type globalFlags struct {
 // pointer to leaf commands via closures - there is no package-level mutable
 // state.
 type env struct {
-	flags  globalFlags
-	cfg    config.Config
-	log    *slog.Logger
-	format output.Format
-	clock  domain.Clock
+	flags          globalFlags
+	cfg            config.Config
+	log            *slog.Logger
+	format         output.Format
+	clock          domain.Clock
+	secretResolver secrets.Resolver
+	ctx            context.Context
 
 	// client is created lazily by requireClient() since commands like
 	// `config validate` and `version` must work without network access or
@@ -81,7 +85,8 @@ func (e *env) loadConfig() error {
 		cfg.Provider.GitLab.BaseURL = e.flags.gitlabURL
 	}
 	if e.flags.tokenEnv != "" {
-		cfg.Provider.GitLab.TokenEnv = e.flags.tokenEnv
+		cfg.Provider.GitLab.Token = config.TokenConfig{Source: secrets.SourceEnv, Env: e.flags.tokenEnv}
+		cfg.Provider.GitLab.TokenEnv = ""
 	}
 	if e.flags.insecure {
 		cfg.Provider.GitLab.InsecureSkipTLSVerify = true
@@ -102,6 +107,13 @@ func (e *env) loadConfig() error {
 	e.format = format
 	e.clock = domain.RealClock{}
 	e.log = newLogger()
+	if e.secretResolver == nil {
+		resolver, err := secrets.NewDefaultResolver()
+		if err != nil {
+			return exitErr(ExitInvalidConfiguration, err)
+		}
+		e.secretResolver = resolver
+	}
 	return nil
 }
 
@@ -115,7 +127,7 @@ func newLogger() *slog.Logger {
 }
 
 // requireClient validates the provider configuration and builds the
-// provider client, resolving the access token from the environment. This
+// provider client, resolving the access token from its configured source. This
 // is only called by commands that actually need network access.
 func (e *env) requireClient() (provider.Client, error) {
 	if e.client != nil {
@@ -124,7 +136,11 @@ func (e *env) requireClient() (provider.Client, error) {
 	if err := e.cfg.Validate(); err != nil {
 		return nil, exitErr(ExitInvalidConfiguration, err)
 	}
-	client, err := providerfactory.New(e.cfg, e.log)
+	ctx := e.ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	client, err := providerfactory.New(ctx, e.cfg, e.secretResolver, e.log)
 	if err != nil {
 		return nil, exitErr(ExitAuthenticationError, err)
 	}

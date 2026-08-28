@@ -22,17 +22,24 @@ and used to run destructive operations, or simply grants an attacker
 whatever access the token has.
 
 **Mitigations**:
-- The token is only ever read from an environment variable named by
-  `token_env`; it is never written to a config file, a plan file, a log
+- The token is resolved from the explicitly configured environment or native
+  keychain reference; it is never written to a config file, a plan file, a log
   line, or an error message (`internal/adapters/gitlab/errors.go`'s
   `safeMessage` deliberately extracts only the message/status, never
   headers or raw request data).
+- Resolution dispatches to exactly one backend. A missing environment variable
+  never falls back to a workstation keychain (or vice versa), preventing use
+  of credentials from an unintended trust boundary.
+- Secret values are not cached by scm-cleaner. The provider adapter receives
+  only the resolved value and has no access to keychain/environment metadata.
+- Native-store security inherits the OS session and keychain policy. On shared
+  or headless hosts, prefer a masked environment variable supplied by CI and
+  scope it to the smallest possible GitLab role/group.
 - README documents least-privilege scope recommendations (`api` scope is
   broad; a dedicated bot account restricted to the minimum role needed for
   the target group is recommended).
-- Not mitigated by this tool: token storage/rotation - that is the
-  operator's responsibility (see "Roadmap" in the README for planned
-  Vault/Secrets Manager integration).
+- Not mitigated by this tool: token rotation and remote secret-manager policy
+  remain the operator's responsibility.
 
 ### 2. Wrong scope targeted
 

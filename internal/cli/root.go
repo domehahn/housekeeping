@@ -50,6 +50,7 @@ func newRootCmd() (*cobra.Command, *env) {
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
+			e.ctx = cmd.Context()
 			return e.loadConfig()
 		},
 	}

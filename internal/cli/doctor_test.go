@@ -9,7 +9,7 @@ import (
 )
 
 func TestDoctor_InvalidConfigStopsAtFirstCheck(t *testing.T) {
-	e := testEnv(newFakeClient()) // config.Default() has no base_url/token_env
+	e := testEnv(newFakeClient()) // config.Default() has no base URL or token reference.
 	stdout, _, err := runCmd(newDoctorCmd(e), nil)
 	if err != nil {
 		t.Fatalf("doctor itself must not error, it reports failures in its table: %v", err)

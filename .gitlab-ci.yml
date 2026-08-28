@@ -9,6 +9,8 @@ stages:
 variables:
   GOPATH: "$CI_PROJECT_DIR/.go"
   GOFLAGS: "-mod=mod"
+  # Provider credentials, when a job needs them, stay in masked/protected CI
+  # variables (for example GITLAB_TOKEN); CI never depends on a host keychain.
   # Jobs that opt into `.runner-tagged` can override this in project/group
   # CI/CD variables without editing the pipeline file.
   SCM_CLEANER_RUNNER_TAG: "docker"

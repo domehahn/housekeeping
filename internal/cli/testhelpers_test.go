@@ -10,6 +10,7 @@ import (
 	"github.com/domehahn/housekeeping/internal/domain"
 	"github.com/domehahn/housekeeping/internal/output"
 	"github.com/domehahn/housekeeping/internal/provider"
+	"github.com/domehahn/housekeeping/internal/secrets"
 )
 
 // fakeClient is an in-memory stand-in for the GitLab adapter, implementing
@@ -165,11 +166,16 @@ var _ provider.Client = (*fakeClient)(nil)
 // construction/config validation - see requireClient) and a fixed clock,
 // ready to hand to a command constructor.
 func testEnv(client provider.Client) *env {
+	resolver, err := secrets.NewDefaultResolver()
+	if err != nil {
+		panic(err)
+	}
 	return &env{
-		cfg:    config.Default(),
-		client: client,
-		format: output.FormatTable,
-		clock:  domain.RealClock{},
+		cfg:            config.Default(),
+		client:         client,
+		format:         output.FormatTable,
+		clock:          domain.RealClock{},
+		secretResolver: resolver,
 	}
 }
 

@@ -35,6 +35,11 @@ DevOps, Gitea, Forgejo, ...) can be added without changing business logic.
 
 ```
 CLI (internal/cli)
+  -> Secret Resolver (internal/secrets)
+       -> Environment backend
+       -> Native OS keychain backend
+  -> Provider Factory (internal/providerfactory; receives generic resolver)
+       -> resolved token only
   -> Application / Use Cases (internal/app)
     -> Domain / Policies (internal/domain, internal/policy/*)
       -> Provider Ports (internal/provider)
@@ -47,6 +52,28 @@ import nothing provider-specific. `internal/app` depends only on the small
 interfaces in `internal/provider`, never on `internal/adapters/gitlab`
 directly (the only exception is `internal/providerfactory`, whose entire
 job is to construct the concrete adapter named by configuration).
+
+### Secret Resolution (`internal/secrets`)
+
+Credentials are represented as a provider-independent `secrets.Reference`
+and resolved through an injected `secrets.Resolver`. A central registry
+dispatches once on the strongly typed source (`env` or `keychain`). A failure
+is returned immediately; there is no cross-source fallback, secret caching, or
+global mutable resolver.
+
+The environment backend wraps an injectable lookup function. The keychain
+backend wraps only `Get(service, account)` from `zalando/go-keyring`; production
+uses macOS Keychain, Linux/BSD Secret Service, or Windows Credential Manager,
+while unit tests inject a fake and never access the real store. If account is
+omitted, the current OS username is resolved at lookup time.
+
+Configuration normalizes both the structured `token` block and legacy
+`token_env` into the same reference. `internal/providerfactory` receives the
+generic resolver, resolves the reference once, and passes only the resulting
+token to the GitLab adapter. Neither the adapter nor application/domain code
+knows which secret backend was used. `config validate` uses the same injected
+resolver and performs no GitLab network call. See
+[ADR 0006](adr/0006-native-secret-resolution.md).
 
 ### Domain (`internal/domain`)
 
@@ -138,8 +165,8 @@ Orchestrates ports + policies for each use case:
 ### CLI (`internal/cli`)
 
 Cobra command tree. Responsible for flag parsing, merging configuration
-(defaults < file < flags; secret values are resolved from their named
-environment variable), building the provider client via
+(defaults < file < flags; secret values are resolved from their environment
+or keychain reference), building the provider client via
 `internal/providerfactory`, rendering output (`internal/output`), writing
 the audit log (`internal/audit`), and mapping errors to documented exit
 codes. Contains no business logic - every command is "gather inputs, call

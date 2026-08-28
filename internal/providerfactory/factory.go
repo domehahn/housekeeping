@@ -10,28 +10,48 @@
 package providerfactory
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 
 	"github.com/domehahn/housekeeping/internal/adapters/gitlab"
 	"github.com/domehahn/housekeeping/internal/config"
 	"github.com/domehahn/housekeeping/internal/provider"
+	"github.com/domehahn/housekeeping/internal/secrets"
 )
 
-// New builds the configured provider's Client. The access token is
-// resolved from the environment variable named by the provider's
-// token_env setting - never read from configuration or a CLI flag.
-func New(cfg config.Config, logger *slog.Logger) (provider.Client, error) {
+type gitLabBuilder func(gitlab.Options) (provider.Client, error)
+
+// New builds the configured provider's Client. Credential resolution is
+// delegated to the injected generic resolver; concrete adapters receive only
+// the resolved token.
+func New(ctx context.Context, cfg config.Config, resolver secrets.Resolver, logger *slog.Logger) (provider.Client, error) {
+	return newWithGitLabBuilder(ctx, cfg, resolver, logger, func(options gitlab.Options) (provider.Client, error) {
+		return gitlab.New(options)
+	})
+}
+
+func newWithGitLabBuilder(ctx context.Context, cfg config.Config, resolver secrets.Resolver, logger *slog.Logger, build gitLabBuilder) (provider.Client, error) {
 	switch cfg.Provider.Type {
 	case "gitlab":
-		token, err := config.ResolveToken(cfg.Provider.GitLab.TokenEnv)
+		if resolver == nil {
+			return nil, fmt.Errorf("build gitlab provider: secret resolver is required")
+		}
+		ref, err := cfg.Provider.GitLab.SecretReference()
 		if err != nil {
 			return nil, err
 		}
+		token, err := resolver.Resolve(ctx, ref)
+		if err != nil {
+			return nil, fmt.Errorf("resolve gitlab credential: %w", err)
+		}
 		if cfg.Provider.GitLab.InsecureSkipTLSVerify {
+			if logger == nil {
+				logger = slog.Default()
+			}
 			logger.Warn("TLS certificate verification is disabled (insecure_skip_tls_verify=true) - traffic to this GitLab instance is not authenticated and may be intercepted")
 		}
-		adapter, err := gitlab.New(gitlab.Options{
+		adapter, err := build(gitlab.Options{
 			BaseURL:               cfg.Provider.GitLab.BaseURL,
 			Token:                 token,
 			InsecureSkipTLSVerify: cfg.Provider.GitLab.InsecureSkipTLSVerify,

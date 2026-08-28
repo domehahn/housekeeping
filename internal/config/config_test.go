@@ -3,14 +3,17 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+
+	"github.com/domehahn/housekeeping/internal/secrets"
 )
 
 func TestValidate(t *testing.T) {
 	valid := func() Config {
 		c := Default()
 		c.Provider.GitLab.BaseURL = "https://gitlab.example.com"
-		c.Provider.GitLab.TokenEnv = "GITLAB_TOKEN"
+		c.Provider.GitLab.Token = TokenConfig{Source: secrets.SourceEnv, Env: "GITLAB_TOKEN"}
 		return c
 	}
 
@@ -77,6 +80,56 @@ func TestValidate(t *testing.T) {
 	})
 }
 
+func TestGitLabSecretReference(t *testing.T) {
+	tests := []struct {
+		name      string
+		config    GitLabConfig
+		want      secrets.Reference
+		wantError string
+	}{
+		{
+			name: "structured environment", config: GitLabConfig{Token: TokenConfig{Source: secrets.SourceEnv, Env: "GITLAB_TOKEN"}},
+			want: secrets.Reference{Source: secrets.SourceEnv, Env: "GITLAB_TOKEN"},
+		},
+		{
+			name: "structured keychain", config: GitLabConfig{Token: TokenConfig{Source: secrets.SourceKeychain, Service: "scm-cleaner", Account: "alice"}},
+			want: secrets.Reference{Source: secrets.SourceKeychain, Service: "scm-cleaner", Account: "alice"},
+		},
+		{
+			name: "keychain account optional", config: GitLabConfig{Token: TokenConfig{Source: secrets.SourceKeychain, Service: "scm-cleaner"}},
+			want: secrets.Reference{Source: secrets.SourceKeychain, Service: "scm-cleaner"},
+		},
+		{
+			name: "legacy environment", config: GitLabConfig{TokenEnv: "GITLAB_TOKEN"},
+			want: secrets.Reference{Source: secrets.SourceEnv, Env: "GITLAB_TOKEN"},
+		},
+		{
+			name: "both syntaxes", config: GitLabConfig{TokenEnv: "OLD", Token: TokenConfig{Source: secrets.SourceEnv, Env: "NEW"}},
+			wantError: "mutually exclusive",
+		},
+		{name: "unknown source", config: GitLabConfig{Token: TokenConfig{Source: "vault"}}, wantError: "unknown"},
+		{name: "missing source", config: GitLabConfig{}, wantError: "source is required"},
+		{name: "env missing name", config: GitLabConfig{Token: TokenConfig{Source: secrets.SourceEnv}}, wantError: "token.env is required"},
+		{name: "env with keychain fields", config: GitLabConfig{Token: TokenConfig{Source: secrets.SourceEnv, Env: "TOKEN", Service: "bad"}}, wantError: "invalid when source is env"},
+		{name: "keychain missing service", config: GitLabConfig{Token: TokenConfig{Source: secrets.SourceKeychain}}, wantError: "service is required"},
+		{name: "keychain with env", config: GitLabConfig{Token: TokenConfig{Source: secrets.SourceKeychain, Service: "svc", Env: "bad"}}, wantError: "invalid when source is keychain"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := tt.config.SecretReference()
+			if tt.wantError != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantError) {
+					t.Fatalf("SecretReference() error = %v, want containing %q", err, tt.wantError)
+				}
+				return
+			}
+			if err != nil || got != tt.want {
+				t.Fatalf("SecretReference() = %+v, %v; want %+v", got, err, tt.want)
+			}
+		})
+	}
+}
+
 func TestLoad_RejectsUnknownFields(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.yaml")
@@ -132,15 +185,55 @@ users:
 	}
 }
 
-func TestResolveToken(t *testing.T) {
-	t.Setenv("SCM_CLEANER_TEST_TOKEN", "secret-value")
-
-	got, err := ResolveToken("SCM_CLEANER_TEST_TOKEN")
-	if err != nil || got != "secret-value" {
-		t.Errorf("ResolveToken = %q, %v", got, err)
+func TestLoad_StructuredSecretReferences(t *testing.T) {
+	tests := map[string]string{
+		"environment": `token:
+      source: env
+      env: GITLAB_TOKEN`,
+		"keychain": `token:
+      source: keychain
+      service: scm-cleaner
+      account: gitlab-bot`,
 	}
+	for name, tokenBlock := range tests {
+		t.Run(name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "config.yaml")
+			content := "version: 1\nprovider:\n  type: gitlab\n  gitlab:\n    base_url: https://gitlab.example.com\n    " + tokenBlock + "\n"
+			if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := Load(path); err != nil {
+				t.Fatalf("Load() error = %v", err)
+			}
+		})
+	}
+}
 
-	if _, err := ResolveToken("SCM_CLEANER_TEST_TOKEN_MISSING"); err == nil {
-		t.Error("expected error for unset environment variable")
+func TestLoad_RejectsLiteralTokenAndInvalidFields(t *testing.T) {
+	tests := map[string]string{
+		"literal token": `provider:
+  type: gitlab
+  gitlab:
+    base_url: https://gitlab.example.com
+    token: literal-secret`,
+		"unknown token field": `provider:
+  type: gitlab
+  gitlab:
+    base_url: https://gitlab.example.com
+    token:
+      source: env
+      env: GITLAB_TOKEN
+      value: literal-secret`,
+	}
+	for name, content := range tests {
+		t.Run(name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "config.yaml")
+			if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := Load(path); err == nil {
+				t.Fatal("expected strict YAML parsing to reject literal/unknown secret field")
+			}
+		})
 	}
 }

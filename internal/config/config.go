@@ -8,6 +8,8 @@ package config
 import (
 	"fmt"
 	"regexp"
+
+	"github.com/domehahn/housekeeping/internal/secrets"
 )
 
 // Config is the root configuration schema, matching examples/config.yaml.
@@ -36,12 +38,63 @@ type ProviderConfig struct {
 
 type GitLabConfig struct {
 	BaseURL string `yaml:"base_url"`
-	// TokenEnv names the environment variable holding the access token.
-	// The token itself is never stored in configuration.
+	// Token selects the environment or native keychain reference used for
+	// authentication. It can never contain the token value itself.
+	Token TokenConfig `yaml:"token"`
+	// TokenEnv is the legacy environment-variable reference. It remains
+	// supported for backwards compatibility but cannot be combined with Token.
 	TokenEnv string `yaml:"token_env"`
 	// InsecureSkipTLSVerify disables TLS certificate verification. Must be
 	// explicitly opted into; the CLI prints a loud warning when enabled.
 	InsecureSkipTLSVerify bool `yaml:"insecure_skip_tls_verify"`
+}
+
+// TokenConfig is the YAML representation of a generic secret reference.
+// Fields that do not apply to the selected source are rejected by Validate.
+type TokenConfig struct {
+	Source  secrets.Source `yaml:"source"`
+	Env     string         `yaml:"env"`
+	Service string         `yaml:"service"`
+	Account string         `yaml:"account"`
+}
+
+func (t TokenConfig) isZero() bool {
+	return t.Source == "" && t.Env == "" && t.Service == "" && t.Account == ""
+}
+
+// SecretReference normalizes the structured token block and legacy token_env
+// syntax into the generic reference consumed by secret resolvers.
+func (g GitLabConfig) SecretReference() (secrets.Reference, error) {
+	if g.TokenEnv != "" && !g.Token.isZero() {
+		return secrets.Reference{}, fmt.Errorf("config: provider.gitlab.token and provider.gitlab.token_env are mutually exclusive")
+	}
+	if g.TokenEnv != "" {
+		return secrets.Reference{Source: secrets.SourceEnv, Env: g.TokenEnv}, nil
+	}
+
+	switch g.Token.Source {
+	case secrets.SourceEnv:
+		if g.Token.Env == "" {
+			return secrets.Reference{}, fmt.Errorf("config: provider.gitlab.token.env is required when source is env")
+		}
+		if g.Token.Service != "" || g.Token.Account != "" {
+			return secrets.Reference{}, fmt.Errorf("config: provider.gitlab.token.service and account are invalid when source is env")
+		}
+	case secrets.SourceKeychain:
+		if g.Token.Service == "" {
+			return secrets.Reference{}, fmt.Errorf("config: provider.gitlab.token.service is required when source is keychain")
+		}
+		if g.Token.Env != "" {
+			return secrets.Reference{}, fmt.Errorf("config: provider.gitlab.token.env is invalid when source is keychain")
+		}
+	case "":
+		return secrets.Reference{}, fmt.Errorf("config: provider.gitlab.token.source is required (supported: env, keychain; legacy token_env is also accepted)")
+	default:
+		return secrets.Reference{}, fmt.Errorf("config: provider.gitlab.token.source %q is unknown (supported: env, keychain)", g.Token.Source)
+	}
+	return secrets.Reference{
+		Source: g.Token.Source, Env: g.Token.Env, Service: g.Token.Service, Account: g.Token.Account,
+	}, nil
 }
 
 type ScopeConfig struct {
@@ -200,10 +253,8 @@ func (c Config) validateProvider() error {
 				"(set it in the config file, via --gitlab-url, or run a command that doesn't need a live " +
 				"connection, e.g. `scm-cleaner provider list`)")
 		}
-		if c.Provider.GitLab.TokenEnv == "" {
-			return fmt.Errorf("config: provider.gitlab.token_env is required and must name the environment " +
-				"variable holding your GitLab access token (set it in the config file or via --token-env, " +
-				"e.g. token_env: GITLAB_TOKEN, then `export GITLAB_TOKEN=...`)")
+		if _, err := c.Provider.GitLab.SecretReference(); err != nil {
+			return err
 		}
 		return nil
 	case "":

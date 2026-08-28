@@ -2,11 +2,10 @@
 #
 # Configuration precedence (lowest to highest):
 #   built-in defaults < this file < CLI flags
-# Secrets are resolved separately from the environment variable named below.
+# Secret values are resolved separately from the reference below.
 #
-# The access token is never stored here - only the name of the
-# environment variable that holds it (token_env). Set that variable
-# before running scm-cleaner, e.g.:
+# The access token is never stored here. This example names an environment
+# variable; set it before running scm-cleaner, e.g.:
 #
 #   export GITLAB_TOKEN=glpat-xxxxxxxxxxxxxxxxxxxx
 
@@ -17,7 +16,15 @@ provider:
 
   gitlab:
     base_url: https://gitlab.example.com
-    token_env: GITLAB_TOKEN
+    token:
+      source: env
+      env: GITLAB_TOKEN
+    # Native OS keychain alternative (replace the token block above):
+    # token:
+    #   source: keychain
+    #   service: scm-cleaner
+    #   account: gitlab-bot  # optional; defaults to the current OS user
+    # Legacy syntax remains accepted: token_env: GITLAB_TOKEN
     # insecure_skip_tls_verify: false  # DANGEROUS - only for isolated test instances
 
 scope:

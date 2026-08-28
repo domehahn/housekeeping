@@ -74,31 +74,115 @@ built binary to report a specific version too.
 export GITLAB_TOKEN="glpat-xxxxxxxxxxxxxxxxxxxx"
 
 scm-cleaner --gitlab-url https://gitlab.example.com \
+  --token-env GITLAB_TOKEN \
   --group my-company/sandbox \
   provider info
 
 scm-cleaner --gitlab-url https://gitlab.example.com \
+  --token-env GITLAB_TOKEN \
   --group my-company/sandbox --recursive \
   projects list
 ```
 
-## 6. GitLab token
+## 6. GitLab authentication
 
-scm-cleaner authenticates with a GitLab **personal, project, or group
-access token** sent as the `PRIVATE-TOKEN` header. The token is read from
-an environment variable named by `provider.gitlab.token_env` (default
-example: `GITLAB_TOKEN`) - **never** from a config file, a CLI flag, or a
-plan file.
+scm-cleaner authenticates with a GitLab **personal, project, or group access
+token** sent as the `PRIVATE-TOKEN` header. Configuration stores only a
+reference to the token. The value is resolved from either an environment
+variable or the operating system's native credential store; it is **never**
+stored in a config file, CLI flag, plan file, log, or error message. Resolution
+uses exactly the selected source and never silently falls back to another one.
 
-Recommended scope: `api` is broadest and sufficient for everything this
-tool does; a narrower `read_api` token works for `list`/`evaluate`/`plan`
-but cannot execute anything. For production use, create a **dedicated bot
-account** scoped to only the groups you intend to clean up, rather than
-using a personal token with instance-wide reach. Some data (see
-[section 15](#15-last-login-vs-last-activity)) and some actions
-([section 17](#17-permissions)) require the token to belong to an instance
-administrator; scm-cleaner degrades gracefully (see
-[section 16](#16-unknown-activity)) when it does not.
+Recommended scope: `api` is broadest and sufficient for everything this tool
+does; a narrower `read_api` token works for `list`/`evaluate`/`plan` but cannot
+execute anything. For production use, create a **dedicated bot account** scoped
+to only the groups you intend to clean up. Some data (see
+[section 15](#15-last-login-vs-last-activity)) and actions
+([section 17](#17-permissions)) require an instance administrator token.
+
+### 6.1 Environment variable
+
+This is the recommended mode for CI. GitLab masked/protected CI variables can
+populate `GITLAB_TOKEN` without putting its value into the repository:
+
+```yaml
+provider:
+  type: gitlab
+  gitlab:
+    base_url: https://gitlab.example.com
+    token:
+      source: env
+      env: GITLAB_TOKEN
+```
+
+```bash
+export GITLAB_TOKEN="glpat-xxxxxxxxxxxxxxxxxxxx"
+scm-cleaner --config scm-cleaner.yaml config validate
+```
+
+An unset variable and an explicitly empty variable both fail closed, with
+distinct errors. The CLI never tries the keychain as a fallback.
+
+### 6.2 Native OS keychain
+
+This mode is convenient for interactive workstations. `service` is required;
+`account` is optional and defaults to the username reported by the operating
+system. Set it explicitly for bot credentials and portable configuration.
+
+```yaml
+provider:
+  type: gitlab
+  gitlab:
+    base_url: https://gitlab.example.com
+    token:
+      source: keychain
+      service: scm-cleaner
+      account: gitlab-bot
+```
+
+macOS Keychain (the first command prompts for the token):
+
+```bash
+security add-generic-password -U -s "scm-cleaner" -a "gitlab-bot" -w
+security find-generic-password -s "scm-cleaner" -a "gitlab-bot" -w
+scm-cleaner --config scm-cleaner.yaml config validate
+```
+
+Linux/BSD Secret Service (`secret-tool` is supplied by libsecret):
+
+```bash
+secret-tool store --label="scm-cleaner GitLab token" service scm-cleaner username gitlab-bot
+secret-tool lookup service scm-cleaner username gitlab-bot
+scm-cleaner --config scm-cleaner.yaml config validate
+```
+
+Windows Credential Manager (PowerShell with the `CredentialManager` module):
+
+```powershell
+Install-Module CredentialManager -Scope CurrentUser
+$token = Read-Host "GitLab token" -AsSecureString
+New-StoredCredential -Target "scm-cleaner:gitlab-bot" -UserName "gitlab-bot" -SecurePassword $token -Type Generic -Persist LocalMachine
+Remove-Variable token
+scm-cleaner --config scm-cleaner.yaml config validate
+```
+
+On Windows the backend identifies entries as `service:account`. Linux/BSD
+requires an unlocked Secret Service session and default collection; headless
+CI should normally use `source: env`. The lookup commands above print the
+credential; use them only for deliberate troubleshooting in a private terminal.
+
+### 6.3 Legacy configuration and CLI override
+
+Existing files remain valid and are normalized internally to an environment
+reference:
+
+```yaml
+token_env: GITLAB_TOKEN
+```
+
+The existing `--token-env GITLAB_TOKEN` flag remains supported and overrides
+either configured token source for that invocation. A file containing both
+`token:` and `token_env:` is rejected as ambiguous.
 
 ## 7. Configuration
 
@@ -110,19 +194,35 @@ policy-relevant block.
 
 **Precedence** (lowest to highest): built-in defaults < config file < CLI
 flags. A `--group` flag always overrides `scope.group` in the file, for
-example. Secret token values are resolved separately from the environment
-variable named by `token_env`; `SCM_CLEANER_DEBUG` only controls logging.
+example. Secret token values are resolved separately through the configured
+`token` reference; `SCM_CLEANER_DEBUG` only controls logging.
 
-Validate a configuration without connecting to anything:
+Validate syntax, semantics, and credential resolution without making a GitLab
+network request (a keychain source may prompt according to OS policy):
 
 ```bash
 scm-cleaner --config myconfig.yaml config validate
 ```
 
+Authentication configuration parameters:
+
+| Parameter | Required/default | Function | Example |
+|---|---|---|---|
+| `provider.gitlab.token.source` | Required for structured syntax | Select exactly `env` or `keychain` | `source: keychain` |
+| `provider.gitlab.token.env` | Required for `source: env` | Name the variable holding the token | `env: GITLAB_TOKEN` |
+| `provider.gitlab.token.service` | Required for `source: keychain` | Native credential-store service name | `service: scm-cleaner` |
+| `provider.gitlab.token.account` | Optional for `source: keychain`; current OS user | Native credential-store account | `account: gitlab-bot` |
+| `provider.gitlab.token_env` | Legacy alternative | Name an environment variable; cannot coexist with `token` | `token_env: GITLAB_TOKEN` |
+
+Fields belonging to another source are invalid: `env` cannot be combined with
+`service`/`account`, and `keychain` cannot be combined with `env`. Unknown
+sources, literal token values, unknown YAML fields, missing credentials, and
+empty credentials all fail validation.
+
 ## 8. Commands
 
 All examples below use `company/platform` as the target group, assume
-`scm-cleaner.yaml` contains the GitLab base URL and `token_env: GITLAB_TOKEN`
+`scm-cleaner.yaml` contains the GitLab base URL and an environment token reference
 as shown in [`examples/config.yaml`](examples/config.yaml), and assume the
 token is exported:
 
@@ -137,7 +237,7 @@ all commands:
 |---|---|---|---|
 | `--config FILE` | Optional; auto-uses `scm-cleaner.yaml` when present | Load strict YAML configuration | `--config production.yaml` |
 | `--gitlab-url URL` | Required for live GitLab calls unless configured | Override `provider.gitlab.base_url` | `--gitlab-url https://gitlab.example.com` |
-| `--token-env NAME` | Required for live GitLab calls unless configured | Name of the environment variable containing the token; never the token itself | `--token-env GITLAB_TOKEN` |
+| `--token-env NAME` | Optional compatibility/override flag | Override the configured source with an environment-variable reference; never pass the token itself | `--token-env GITLAB_TOKEN` |
 | `--group PATH` | Required for scoped commands unless configured | Select a group or subgroup | `--group company/platform` |
 | `--recursive` | Optional; default from config, otherwise `false` | Include every descendant subgroup | `--recursive` |
 | `--workers N` | Optional; config/default is `5` | Bound concurrent read operations | `--workers 8` |
@@ -813,10 +913,21 @@ Go client. It:
 
    ```go
    case "github":
-       token, err := config.ResolveToken(cfg.Provider.GitHub.TokenEnv)
+       ref, err := cfg.Provider.GitHub.SecretReference()
+       if err != nil {
+           return nil, err
+       }
+       token, err := resolver.Resolve(ctx, ref)
+       if err != nil {
+           return nil, fmt.Errorf("resolve github credential: %w", err)
+       }
        ...
        return github.New(github.Options{ Organization: cfg.Provider.GitHub.Organization, Token: token })
    ```
+
+   Normalize that provider's configuration into `secrets.Reference`; do not
+   teach the adapter about environment variables, keychains, or resolver
+   implementations.
 
 5. **Do not** change `internal/app`, `internal/policy/*`, or CLI command
    bodies - `InactiveProjectPolicy`, `InactiveUserPolicy`, the planner, and
@@ -937,11 +1048,9 @@ Highlights:
 - **Regex ReDoS**: not specifically mitigated beyond relying on Go's RE2-
   derived `regexp` package, which has linear-time matching guarantees
   regardless of pattern shape.
-- **No secret-manager integration yet** (Vault, AWS/Azure Secrets
-  Manager, Kubernetes Secrets) - `token_env` (a plain environment
-  variable) is the only supported source today; the provider factory is
-  structured so a secret-resolution abstraction can be added without
-  changing call sites.
+- **No remote secret-manager integration yet** (Vault, AWS/Azure Secrets
+  Manager, Kubernetes Secrets). Environment variables and the native OS
+  keychain are supported. Resolution never falls back between sources.
 
 ## 24. Pipeline tag cleanup
 
@@ -1025,7 +1134,7 @@ narrow external race remains. See
   `NoProjectMembershipPolicy`, `ExpiredAccountPolicy`, `BotAccountPolicy`,
   `ServiceAccountPolicy` - all of which fit the existing
   `domain.UserPolicy` interface without further architectural change.
-- Secret resolution abstraction (Vault / AWS / Azure / Kubernetes) behind
-  the existing `token_env`-shaped configuration.
+- Optional remote secret resolvers (Vault / AWS / Azure / Kubernetes) behind
+  the generic resolver interface.
 - Re-evaluating the max-percentage safety guard against a freshly
   discovered total at execute time (currently only enforced at plan time).

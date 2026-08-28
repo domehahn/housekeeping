@@ -30,7 +30,7 @@ func Registry() []Descriptor {
 			Description: "GitLab (self-managed and GitLab.com)",
 			RequiredConfig: []string{
 				"provider.gitlab.base_url (or --gitlab-url)",
-				"provider.gitlab.token_env (or --token-env), naming an environment variable that holds the access token",
+				"provider.gitlab.token (env or keychain reference), or legacy provider.gitlab.token_env/--token-env",
 			},
 		},
 	}

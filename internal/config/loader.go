@@ -30,18 +30,3 @@ func Load(path string) (Config, error) {
 	}
 	return cfg, nil
 }
-
-// ResolveToken looks up the access token from the environment variable
-// named by the provider's token_env setting. It never returns a default or
-// falls back to a literal token in the config file - tokens must only ever
-// come from the environment.
-func ResolveToken(tokenEnv string) (string, error) {
-	if tokenEnv == "" {
-		return "", fmt.Errorf("config: no token_env configured")
-	}
-	val, ok := os.LookupEnv(tokenEnv)
-	if !ok || val == "" {
-		return "", fmt.Errorf("config: environment variable %s is not set", tokenEnv)
-	}
-	return val, nil
-}

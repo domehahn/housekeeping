@@ -2,7 +2,6 @@ package cli
 
 import (
 	"fmt"
-	"os"
 
 	"github.com/spf13/cobra"
 )
@@ -29,7 +28,14 @@ func newConfigValidateCmd(e *env) *cobra.Command {
 				return exitErr(ExitInvalidConfiguration, err)
 			}
 			if e.cfg.Provider.Type == "gitlab" {
-				if _, err := lookupTokenEnv(e.cfg.Provider.GitLab.TokenEnv); err != nil {
+				ref, err := e.cfg.Provider.GitLab.SecretReference()
+				if err != nil {
+					return exitErr(ExitInvalidConfiguration, err)
+				}
+				if e.secretResolver == nil {
+					return exitErr(ExitInvalidConfiguration, fmt.Errorf("secret resolver is not configured"))
+				}
+				if _, err := e.secretResolver.Resolve(cmd.Context(), ref); err != nil {
 					return exitErr(ExitInvalidConfiguration, err)
 				}
 			}
@@ -37,14 +43,4 @@ func newConfigValidateCmd(e *env) *cobra.Command {
 			return nil
 		},
 	}
-}
-
-func lookupTokenEnv(name string) (string, error) {
-	if name == "" {
-		return "", fmt.Errorf("provider.gitlab.token_env is not set")
-	}
-	if _, ok := os.LookupEnv(name); !ok {
-		return "", fmt.Errorf("environment variable %s (named by provider.gitlab.token_env) is not set", name)
-	}
-	return name, nil
 }
