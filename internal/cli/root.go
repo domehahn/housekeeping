@@ -45,7 +45,7 @@ func newRootCmd() (*cobra.Command, *env) {
 
 	root := &cobra.Command{
 		Use:           "scm-cleaner",
-		Short:         "Automated, policy-driven cleanup for source-code-management platforms",
+		Short:         "Policy-driven SCM housekeeping and GitLab CI runner-tag management",
 		Long:          rootLongDescription,
 		SilenceUsage:  true,
 		SilenceErrors: true,
@@ -87,8 +87,8 @@ func defaultConfigPath() string {
 }
 
 const rootLongDescription = `scm-cleaner discovers, evaluates, plans, and (only when explicitly
-approved) executes cleanup of stale resources - projects and users - on
-source-code-management platforms.
+approved) executes cleanup of stale projects/users and CI runner-tag rollouts
+on source-code-management platforms.
 
 Currently implemented: GitLab (self-managed and GitLab.com).
 

@@ -32,10 +32,10 @@ func newExecuteCmd(e *env) *cobra.Command {
 
 	cmd := &cobra.Command{
 		Use:   "execute <plan-file>",
-		Short: "Simulate (default) or apply (--apply) a saved cleanup plan",
+		Short: "Simulate (default) or apply (--apply) any saved plan",
 		Args:  cobra.ExactArgs(1),
-		Long: `execute reads a plan file produced by "projects plan" or "users plan" and
-carries out its actions.
+		Long: `execute reads a plan file produced by "projects plan", "users plan",
+"pipelines plan", or "runners plan" and carries out its actions.
 
 Without --apply, every action is only simulated: nothing is changed. This
 is the default and cannot be bypassed accidentally.

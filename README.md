@@ -1,18 +1,20 @@
 # scm-cleaner
 
 A safe, provider-independent CLI for discovering and cleaning up stale
-resources - projects and users - on source-code-management platforms.
+projects and users, proposing GitLab CI runner-tag changes through Merge
+Requests, and managing tags on eligible GitLab runners.
 GitLab (self-managed and GitLab.com) is fully implemented today; the
 architecture is designed so GitHub, Bitbucket, Azure DevOps, Gitea, and
 Forgejo can be added later without touching business logic.
 
 ## 1. Project description
 
-scm-cleaner discovers projects and users within a GitLab group (optionally
-recursive across subgroups), evaluates them against configurable policies
-(inactivity thresholds, name patterns, archived state, last-login vs.
-last-activity), produces a reviewable plan of proposed actions, and -
-only when explicitly approved - executes that plan.
+scm-cleaner discovers projects, direct group members, pipeline configuration,
+and available runners within a GitLab group (optionally recursive across
+subgroups). It evaluates them against configurable policies, produces a
+reviewable plan, and executes that plan only after explicit approval. Pipeline
+tag changes are proposed as Merge Requests; runner-tag changes use conservative
+reach analysis and fail closed when their effect cannot be proven.
 
 ## 2. Motivation
 
@@ -49,7 +51,7 @@ Or directly from a tagged release, without cloning:
 ```bash
 go install github.com/domehahn/housekeeping/cmd/scm-cleaner@latest
 # or pin a specific version:
-go install github.com/domehahn/housekeeping/cmd/scm-cleaner@v0.1.0
+go install github.com/domehahn/housekeeping/cmd/scm-cleaner@v0.2.1
 ```
 
 This places a `scm-cleaner` binary in `$(go env GOPATH)/bin` (make sure
@@ -119,43 +121,312 @@ scm-cleaner --config myconfig.yaml config validate
 
 ## 8. Commands
 
+All examples below use `company/platform` as the target group, assume
+`scm-cleaner.yaml` contains the GitLab base URL and `token_env: GITLAB_TOKEN`
+as shown in [`examples/config.yaml`](examples/config.yaml), and assume the
+token is exported:
+
+```bash
+export GITLAB_TOKEN="glpat-xxxxxxxxxxxxxxxxxxxx"
 ```
+
+Global flags can be supplied before or after a subcommand:
+
+| Flag | Purpose | Example |
+|---|---|---|
+| `--config FILE` | Load YAML configuration | `--config scm-cleaner.yaml` |
+| `--gitlab-url URL` | Override `provider.gitlab.base_url` | `--gitlab-url https://gitlab.example.com` |
+| `--token-env NAME` | Name of the environment variable containing the token | `--token-env GITLAB_TOKEN` |
+| `--group PATH` | Group or subgroup to evaluate | `--group company/platform` |
+| `--recursive` | Include all descendant subgroups | `--recursive` |
+| `--workers N` | Bound concurrent read operations | `--workers 8` |
+| `--output FORMAT` | Render `table`, `json`, or `yaml` | `--output json` |
+| `--audit-log FILE` | Append apply outcomes as JSON Lines | `--audit-log audit.jsonl` |
+| `--insecure-skip-tls-verify` | Disable TLS verification | Avoid except for an explicitly accepted test environment |
+
+### 8.1 Version and shell completion
+
+Show build metadata:
+
+```bash
 scm-cleaner version
-scm-cleaner provider list            # static, no config/credentials needed
-scm-cleaner provider info            # live: needs a working connection
-scm-cleaner provider capabilities    # live: needs a working connection
-scm-cleaner projects list
-scm-cleaner projects evaluate
-scm-cleaner projects plan
-scm-cleaner users list
-scm-cleaner users evaluate
-scm-cleaner users plan
-scm-cleaner pipelines list
-scm-cleaner pipelines evaluate
-scm-cleaner pipelines plan
-scm-cleaner runners list
-scm-cleaner runners evaluate
-scm-cleaner runners plan
-scm-cleaner execute <plan-file>
-scm-cleaner config validate
-scm-cleaner doctor
+scm-cleaner version --output json
 ```
 
-Every command accepts `--output table|json|yaml` (default `table`).
-`table` output never contains ANSI color codes, so it is safe piped
-through other tools, redirected to a file, or read in CI logs; `NO_COLOR`
-is trivially respected because no color is ever emitted.
+Generate completion for the current shell:
 
-**`provider list` vs. `provider info`/`capabilities`**: `provider list` is
-purely static - it needs no `base_url`, no token, and makes no network
-call, so it works before you've configured anything (useful to check what
-this build supports). `provider info` and `provider capabilities`
-genuinely need a working connection: they report *live* facts (the
-authenticated identity, the connected server's version, what your actual
-credentials can do right now) that cannot exist without one, so they
-validate the full provider configuration first and fail with an
-actionable message (e.g. "set `--gitlab-url` or `provider.gitlab.base_url`")
-if it's incomplete.
+```bash
+scm-cleaner completion bash > scm-cleaner.bash
+scm-cleaner completion zsh > _scm-cleaner
+scm-cleaner completion fish > scm-cleaner.fish
+scm-cleaner completion powershell > scm-cleaner.ps1
+```
+
+### 8.2 Configuration and diagnostics
+
+Validate YAML, unknown fields, semantic constraints, and the configured token
+environment variable without modifying GitLab:
+
+```bash
+scm-cleaner --config scm-cleaner.yaml config validate
+```
+
+Run read-only connectivity, authentication, group-resolution, permission, and
+capability diagnostics:
+
+```bash
+scm-cleaner --config scm-cleaner.yaml doctor
+
+# The same diagnostic using flags instead of a configuration file:
+scm-cleaner doctor \
+  --gitlab-url https://gitlab.example.com \
+  --token-env GITLAB_TOKEN \
+  --group company/platform \
+  --recursive
+
+# Enable diagnostic logging for one invocation:
+SCM_CLEANER_DEBUG=1 scm-cleaner --config scm-cleaner.yaml doctor
+```
+
+### 8.3 Provider inspection
+
+`provider list` is static and works without configuration or credentials.
+`provider info` and `provider capabilities` query the configured instance.
+
+```bash
+# Providers compiled into this binary:
+scm-cleaner provider list
+
+# Connected instance, server version, authenticated user, and admin status:
+scm-cleaner provider info \
+  --gitlab-url https://gitlab.example.com \
+  --token-env GITLAB_TOKEN
+
+# Operations available to the current credentials:
+scm-cleaner provider capabilities \
+  --gitlab-url https://gitlab.example.com \
+  --token-env GITLAB_TOKEN
+```
+
+### 8.4 Project discovery, evaluation, and plans
+
+`projects list` discovers projects. `projects evaluate` applies inactivity,
+archived-state, include/exclude, and protection policies without producing a
+plan. `projects plan` converts matches into `report`, `archive`, or `delete`
+actions. Exclusions and protection always win over matches.
+
+```bash
+# List projects directly in the group and every descendant subgroup:
+scm-cleaner projects list \
+  --group company/platform --recursive
+
+# Find projects inactive for more than 90 days. Include/exclude flags are
+# repeatable and augment configuration-file rules:
+scm-cleaner projects evaluate \
+  --group company/platform --recursive \
+  --inactive-for 90d \
+  --include 'sandbox|experiment' \
+  --exclude '^company/platform/permanent-demo$'
+
+# Report-only plan: records matches but causes no provider mutation:
+scm-cleaner projects plan \
+  --group company/platform --recursive \
+  --inactive-for 90d --action report \
+  --output-plan project-report.json
+
+# Archive plan:
+scm-cleaner projects plan \
+  --group company/platform --recursive \
+  --inactive-for 180d --action archive \
+  --output-plan project-archive.json
+
+# Delete plan. The explicit override applies only to this planning run:
+scm-cleaner projects plan \
+  --group company/platform --recursive \
+  --inactive-for 365d --action delete \
+  --max-actions 5 --max-percentage 10 \
+  --output-plan project-delete.json
+```
+
+### 8.5 User discovery, evaluation, and plans
+
+`users list` returns unique users discovered through direct memberships in the
+resolved scope (retaining the first direct membership found for each user).
+`users evaluate` checks last login and last activity. `--match all` requires
+both configured criteria to match; `--match any` requires either. `users plan`
+supports `report`, `remove-from-group`, and instance-wide `block` actions.
+
+```bash
+# List direct members and their access level/activity data:
+scm-cleaner users list \
+  --group company/platform --recursive
+
+# Shorthand: both last login and last activity must be older than 90 days:
+scm-cleaner users evaluate \
+  --group company/platform --recursive \
+  --inactive-for 90d --match all
+
+# Independent criteria, matching either one:
+scm-cleaner users evaluate \
+  --group company/platform --recursive \
+  --last-login-before 120d \
+  --last-activity-before 60d \
+  --match any
+
+# Report-only plan:
+scm-cleaner users plan \
+  --group company/platform --recursive \
+  --inactive-for 90d --action report \
+  --output-plan user-report.json
+
+# Remove each matched direct membership from its specific group:
+scm-cleaner users plan \
+  --group company/platform --recursive \
+  --inactive-for 180d --action remove-from-group \
+  --output-plan remove-members.json
+
+# Block matched accounts instance-wide (requires an instance administrator):
+scm-cleaner users plan \
+  --group company/platform --recursive \
+  --inactive-for 365d --action block \
+  --max-actions 3 --output-plan block-users.json
+```
+
+The optional billable-seat override ignores global activity only when a user is
+billable in the selected top-level group but has no membership at or above the
+chosen threshold elsewhere. It requires Owner on that top-level group and an
+instance-administrator token:
+
+```bash
+scm-cleaner users evaluate \
+  --group company --recursive \
+  --inactive-for 90d \
+  --ignore-global-activity-if-non-billable-elsewhere \
+  --billable-threshold developer
+```
+
+### 8.6 Pipeline CI-tag proposals
+
+`pipelines list` reports which projects have `.gitlab-ci.yml`.
+`pipelines evaluate` identifies missing tags, parse/fetch errors, protected
+projects, and `include:` warnings. `pipelines plan` creates actions that open
+one reviewable Merge Request per eligible project; it never merges them.
+
+```bash
+# Discover CI configuration files:
+scm-cleaner pipelines list \
+  --group company/platform --recursive
+
+# Check default.tags and existing job-level tags lists:
+scm-cleaner pipelines evaluate \
+  --group company/platform --recursive \
+  --tag k8s-runner
+
+# Create the reviewable proposal plan:
+scm-cleaner pipelines plan \
+  --group company/platform --recursive \
+  --tag k8s-runner \
+  --max-actions 10 \
+  --output-plan pipeline-tags.json
+
+# Simulate, then open the Merge Requests after confirmation:
+scm-cleaner execute pipeline-tags.json
+scm-cleaner execute pipeline-tags.json --apply
+```
+
+The patch adds the tag to `default.tags` and to jobs/templates that already
+define their own `tags:` list. Jobs inheriting `default.tags` remain unchanged,
+external includes are reported but not followed, and GitLab `spec:` header
+documents are preserved.
+
+### 8.7 Runner-tag management
+
+`runners list` reports runners available to in-scope projects, their type,
+tags, explicit out-of-scope assignments, and reach status. `runners evaluate`
+checks a desired tag. `runners plan` includes only runners whose effective
+reach can be proven safely.
+
+```bash
+# List available project/group/instance runners and impact status:
+scm-cleaner runners list \
+  --group company/platform --recursive
+
+# Evaluate a tag for one subgroup and all its descendants:
+scm-cleaner runners evaluate \
+  --group company/platform/subgroup --recursive \
+  --tag k8s-runner
+
+# Plan eligible runner updates:
+scm-cleaner runners plan \
+  --group company/platform/subgroup --recursive \
+  --tag k8s-runner \
+  --max-actions 5 \
+  --output-plan runner-tags.json
+
+# Dry run:
+scm-cleaner execute runner-tags.json
+
+# Non-interactive apply with no explicit out-of-scope assignments:
+scm-cleaner execute runner-tags.json --apply --non-interactive \
+  --confirm-scope company/platform/subgroup
+
+# If the reviewed plan records three explicit out-of-scope assignments:
+scm-cleaner execute runner-tags.json --apply --non-interactive \
+  --confirm-scope company/platform/subgroup \
+  --confirm-out-of-scope-impact 3
+```
+
+Project runners are evaluated through explicit assignments. A group runner is
+eligible only when its owning group is contained by a recursive scope. Parent-
+group runners inherited by a subgroup, instance runners, and unknown types are
+shown as `blocked` and omitted from plans.
+
+### 8.8 Executing any saved plan
+
+`execute` accepts plans from all four planners. It validates the plan hash,
+schema version, provider, instance, action limits, and current resource state.
+Dry run is the default.
+
+```bash
+# Simulate every action:
+scm-cleaner execute project-delete.json
+
+# Interactive apply (requires typing "apply N actions"):
+scm-cleaner execute project-delete.json --apply
+
+# Non-interactive apply requires an exact scope confirmation:
+scm-cleaner execute project-delete.json --apply --non-interactive \
+  --confirm-scope company/platform
+
+# Record every apply outcome in an audit log:
+scm-cleaner execute project-archive.json --apply --non-interactive \
+  --confirm-scope company/platform \
+  --audit-log scm-cleaner-audit.jsonl
+
+# Explicitly override the absolute action guard for this execution only:
+scm-cleaner execute project-delete.json --apply --non-interactive \
+  --confirm-scope company/platform --max-actions 20
+```
+
+One failed action does not stop unrelated actions unless
+`execution.fail_fast: true`. Already completed actions are idempotent skips.
+Live protection and activity are revalidated by default; runner actions also
+re-resolve scope/reach and perform a final tag-list conflict check.
+
+### 8.9 Machine-readable output
+
+Commands that return structured results support table, JSON, and YAML output.
+Table output contains no ANSI color codes and is safe for pipes and CI logs.
+
+```bash
+scm-cleaner projects list --group company/platform --output json > projects.json
+scm-cleaner users evaluate --group company/platform --inactive-for 90d --output yaml
+scm-cleaner provider capabilities --output table
+```
+
+Run `scm-cleaner <command> --help` or
+`scm-cleaner <command> <subcommand> --help` for the authoritative flags of the
+installed version.
 
 ## 9. Dry run
 
@@ -165,10 +436,10 @@ clearly labeled `dry_run`. Nothing in this tool ever deletes or modifies a
 resource as a side effect of discovery, evaluation, or planning; only
 `execute --apply` can.
 
-## 10. Cleanup plans
+## 10. Plans
 
-`projects plan` / `users plan` evaluate resources and, with
-`--output-plan FILE`, write a plan document:
+`projects plan`, `users plan`, `pipelines plan`, and `runners plan` evaluate
+resources and, with `--output-plan FILE`, write a plan document:
 
 ```json
 {
@@ -391,7 +662,7 @@ visible. See [ADR 0003](docs/adr/0003-unknown-activity-safe-default.md).
 | List billable members of a group (`--ignore-global-activity-if-non-billable-elsewhere`) | **Owner on that specific top-level group**; does not work on subgroups |
 | List a user's memberships instance-wide (same feature) | **Instance administrator** |
 | Open a Merge Request proposing a `.gitlab-ci.yml` tag change | At least **Developer** on the project (to push a branch and open a Merge Request) |
-| Update a runner's tags | **Maintainer+** on a project the runner is enabled for, or **Owner** on the runner's owning group for a shared runner |
+| Update a runner's tags | GitLab's **`manage_runner` permission** for that runner; this is typically Maintainer+ for an eligible project runner or Owner for an owned group runner |
 
 `scm-cleaner provider capabilities` reports what is actually available
 given the current token, and `scm-cleaner doctor` runs a full read-only
@@ -422,6 +693,10 @@ Go client. It:
 - Optionally enriches member records with admin-only activity fields via
   `GET /users/:id`, bounded by a worker pool (`performance.workers`).
 - Deletes/archives projects, removes group members, blocks users.
+- Reads and safely patches `.gitlab-ci.yml`, preserves GitLab `spec:` header
+  documents, and opens/reuses content-addressed Merge Request proposals.
+- Lists runners available to scoped projects, distinguishes project/group/
+  instance reach, and performs best-effort concurrent tag-update detection.
 - Retries 429/5xx responses with exponential backoff (via the SDK's
   built-in `retryablehttp` transport) and never retries 401/403/404.
 - Classifies every error into a small, provider-independent taxonomy
@@ -474,9 +749,9 @@ make integration-test   # opt-in, see below
   authentication headers, pagination across multiple pages, subgroup
   recursion and de-duplication, direct-vs-admin-enriched member activity,
   nil/unknown activity mapping, delete/remove operations,
-  401/403/404/429/500 error classification, the branch/commit/Merge
-  Request sequence for pipeline tag proposals, and runner listing/tag
-  updates with blast-radius mapping.
+  401/403/404/429/500 error classification, retry-safe Merge Request
+  proposals, GitLab CI multi-document preservation, runner reach analysis,
+  live execution revalidation, and concurrent tag-change detection.
 - **Integration tests** (`test/integration/gitlab`) are skipped unless
   `GITLAB_INTEGRATION_TEST=true`, `GITLAB_URL`, and `GITLAB_TOKEN` are all
   set. Destructive scenarios additionally require
@@ -498,7 +773,8 @@ Set `SCM_CLEANER_RUNNER_TAG` as a project or group CI/CD variable (the example
 default is `docker`). For multiple required tags, copy the template's `tags`
 array into the job and add one entry per tag. These are GitLab CI **job tags**,
 which select a compatible runner. A runner's own tag list is administered via
-GitLab's Runner API and can affect every project assigned to that runner - this
+GitLab's Runner API and can affect explicit project assignments plus every
+project reached implicitly through group or instance availability. This
 repository's own pipeline does not mutate runner registrations for itself, but
 `scm-cleaner` can do exactly this *for other groups/projects* as a deliberate,
 guarded feature (see [§24](#24-pipeline-tag-cleanup) and
