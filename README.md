@@ -130,23 +130,32 @@ token is exported:
 export GITLAB_TOKEN="glpat-xxxxxxxxxxxxxxxxxxxx"
 ```
 
-Global flags can be supplied before or after a subcommand:
+Global flags can be supplied before or after a subcommand and are inherited by
+all commands:
 
-| Flag | Purpose | Example |
-|---|---|---|
-| `--config FILE` | Load YAML configuration | `--config scm-cleaner.yaml` |
-| `--gitlab-url URL` | Override `provider.gitlab.base_url` | `--gitlab-url https://gitlab.example.com` |
-| `--token-env NAME` | Name of the environment variable containing the token | `--token-env GITLAB_TOKEN` |
-| `--group PATH` | Group or subgroup to evaluate | `--group company/platform` |
-| `--recursive` | Include all descendant subgroups | `--recursive` |
-| `--workers N` | Bound concurrent read operations | `--workers 8` |
-| `--output FORMAT` | Render `table`, `json`, or `yaml` | `--output json` |
-| `--audit-log FILE` | Append apply outcomes as JSON Lines | `--audit-log audit.jsonl` |
-| `--insecure-skip-tls-verify` | Disable TLS verification | Avoid except for an explicitly accepted test environment |
+| Parameter | Required/default | Function | Example |
+|---|---|---|---|
+| `--config FILE` | Optional; auto-uses `scm-cleaner.yaml` when present | Load strict YAML configuration | `--config production.yaml` |
+| `--gitlab-url URL` | Required for live GitLab calls unless configured | Override `provider.gitlab.base_url` | `--gitlab-url https://gitlab.example.com` |
+| `--token-env NAME` | Required for live GitLab calls unless configured | Name of the environment variable containing the token; never the token itself | `--token-env GITLAB_TOKEN` |
+| `--group PATH` | Required for scoped commands unless configured | Select a group or subgroup | `--group company/platform` |
+| `--recursive` | Optional; default from config, otherwise `false` | Include every descendant subgroup | `--recursive` |
+| `--workers N` | Optional; config/default is `5` | Bound concurrent read operations | `--workers 8` |
+| `--output FORMAT` | Optional; `table` | Render `table`, `json`, or `yaml` where supported | `--output json` |
+| `--audit-log FILE` | Optional; disabled | Append execution outcomes as owner-readable JSON Lines | `--audit-log audit.jsonl` |
+| `--insecure-skip-tls-verify` | Optional; `false` | Disable TLS verification and print a warning | Use only in an explicitly accepted test environment |
+| `-h`, `--help` | Optional | Show authoritative help for the selected command | `scm-cleaner runners plan --help` |
 
 ### 8.1 Version and shell completion
 
 Show build metadata:
+
+| Command/parameter | Required/default | Function |
+|---|---|---|
+| `version` | Command | Print version, commit, build date, and Go version |
+| `version --output table\|json\|yaml` | Optional; `table` | Select version output format |
+| `completion <shell>` | Shell required: `bash`, `zsh`, `fish`, or `powershell` | Generate a completion script on stdout |
+| `completion <shell> --no-descriptions` | Optional; `false` | Omit descriptions from generated completions |
 
 ```bash
 scm-cleaner version
@@ -166,6 +175,14 @@ scm-cleaner completion powershell > scm-cleaner.ps1
 
 Validate YAML, unknown fields, semantic constraints, and the configured token
 environment variable without modifying GitLab:
+
+| Command | Local parameters | Function |
+|---|---|---|
+| `config validate` | None | Validate configuration and token-environment presence; performs no GitLab API call |
+| `doctor` | None | Run read-only config, connection, authentication, scope, permission, and capability checks |
+
+Both commands inherit the global parameters above. `doctor` needs live provider
+configuration; `config validate` does not connect to GitLab.
 
 ```bash
 scm-cleaner --config scm-cleaner.yaml config validate
@@ -193,6 +210,12 @@ SCM_CLEANER_DEBUG=1 scm-cleaner --config scm-cleaner.yaml doctor
 `provider list` is static and works without configuration or credentials.
 `provider info` and `provider capabilities` query the configured instance.
 
+| Command | Local parameters | Function |
+|---|---|---|
+| `provider list` | None | List provider types compiled into the binary and required configuration |
+| `provider info` | None | Show provider, instance URL/version, authenticated identity, and admin status |
+| `provider capabilities` | None | Report support/required privilege for every provider operation |
+
 ```bash
 # Providers compiled into this binary:
 scm-cleaner provider list
@@ -214,6 +237,22 @@ scm-cleaner provider capabilities \
 archived-state, include/exclude, and protection policies without producing a
 plan. `projects plan` converts matches into `report`, `archive`, or `delete`
 actions. Exclusions and protection always win over matches.
+
+| Command/parameter | Required/default | Function |
+|---|---|---|
+| `projects list` | No local parameters | List project ID, path, archived state, and last activity |
+| `projects evaluate` | Policy from config or flags | Evaluate and show matched projects/reasons without creating a plan |
+| `projects plan` | Policy from config or flags | Evaluate and render a plan; save it when `--output-plan` is set |
+| `--inactive-for DURATION` | Optional; config policy otherwise | Match activity older than values such as `90d` |
+| `--include REGEX` | Optional, repeatable | Add a project path/slug include expression |
+| `--exclude REGEX_OR_PATH` | Optional, repeatable | Add an exclusion; exclusions always win |
+| `--action report\|archive\|delete` | Plan only; `report` | Choose the planned action |
+| `--output-plan FILE` | Plan only; optional | Save canonical hashed JSON for `execute` |
+| `--max-actions N` | Plan only; config limit | Explicitly override `safety.max_actions.projects` for this run |
+| `--max-percentage N` | Plan only; config limit/`0` disabled | Override `safety.max_percentage.projects` for this run |
+
+The evaluate/plan parameters augment or override project policies loaded from
+configuration. Archived-state and protection rules are configuration-only.
 
 ```bash
 # List projects directly in the group and every descendant subgroup:
@@ -255,6 +294,26 @@ resolved scope (retaining the first direct membership found for each user).
 `users evaluate` checks last login and last activity. `--match all` requires
 both configured criteria to match; `--match any` requires either. `users plan`
 supports `report`, `remove-from-group`, and instance-wide `block` actions.
+
+| Command/parameter | Required/default | Function |
+|---|---|---|
+| `users list` | No local parameters | List user, first direct membership/access level, login, and activity |
+| `users evaluate` | Inactivity policy required | Evaluate inactivity/protection without creating a plan |
+| `users plan` | Inactivity policy required | Evaluate and render/save a plan |
+| `--inactive-for DURATION` | Optional | Set both login and activity thresholds, for example `90d` |
+| `--last-login-before DURATION` | Optional; config threshold otherwise | Set/override only the login threshold |
+| `--last-activity-before DURATION` | Optional; config threshold otherwise | Set/override only the activity threshold |
+| `--match all\|any` | Optional; config/default `all` | Require both criteria or either criterion |
+| `--ignore-global-activity-if-non-billable-elsewhere` | Optional; disabled | Enable the billable-seat override described below |
+| `--billable-threshold LEVEL` | Optional; `developer` | Set `guest`, `reporter`, `developer`, `maintainer`, or `owner` as the external privileged-membership threshold |
+| `--action report\|remove-from-group\|block` | Plan only; `report` | Choose the planned action |
+| `--output-plan FILE` | Plan only; optional | Save canonical hashed JSON for `execute` |
+| `--max-actions N` | Plan only; config limit | Override `safety.max_actions.users` for this run |
+| `--max-percentage N` | Plan only; config limit/`0` disabled | Override `safety.max_percentage.users` for this run |
+
+When shorthand and individual thresholds are combined, the individual
+`--last-*-before` value wins for its field. Unknown-activity behavior,
+protected usernames/roles, and current-user exclusion are configuration-only.
 
 ```bash
 # List direct members and their access level/activity data:
@@ -312,6 +371,19 @@ scm-cleaner users evaluate \
 projects, and `include:` warnings. `pipelines plan` creates actions that open
 one reviewable Merge Request per eligible project; it never merges them.
 
+| Command/parameter | Required/default | Function |
+|---|---|---|
+| `pipelines list` | No local parameters | Show whether each scoped project has `.gitlab-ci.yml` |
+| `pipelines evaluate --tag TAG` | `--tag` required | Analyze current CI YAML and report tag status/reasons |
+| `pipelines plan --tag TAG` | `--tag` required | Build Merge Request proposal actions for eligible projects |
+| `--output-plan FILE` | Plan only; optional | Save canonical hashed JSON for `execute` |
+| `--max-actions N` | Plan only; config limit | Override `safety.max_actions.pipeline_tags` for this run |
+| `--max-percentage N` | Plan only; config limit/`0` disabled | Override `safety.max_percentage.pipeline_tags` for this run |
+
+All pipeline commands also use global scope, recursion, workers, provider, and
+output parameters. Project protection is loaded from configuration and applies
+to pipeline proposals too.
+
 ```bash
 # Discover CI configuration files:
 scm-cleaner pipelines list \
@@ -345,6 +417,18 @@ documents are preserved.
 tags, explicit out-of-scope assignments, and reach status. `runners evaluate`
 checks a desired tag. `runners plan` includes only runners whose effective
 reach can be proven safely.
+
+| Command/parameter | Required/default | Function |
+|---|---|---|
+| `runners list` | No local parameters | List available runners, type, tags, explicit external assignments, and impact status |
+| `runners evaluate --tag TAG` | `--tag` required | Report whether each runner has the tag and whether changing it is safe |
+| `runners plan --tag TAG` | `--tag` required | Plan updates only for missing-tag runners with provable reach |
+| `--output-plan FILE` | Plan only; optional | Save canonical hashed JSON for `execute` |
+| `--max-actions N` | Plan only; config limit | Override `safety.max_actions.runner_tags` for this run |
+| `--max-percentage N` | Plan only; config limit/`0` disabled | Override `safety.max_percentage.runner_tags` for this run |
+
+Global `--group` and `--recursive` are safety-relevant here: they determine
+whether the owning group and all descendant projects are covered.
 
 ```bash
 # List available project/group/instance runners and impact status:
@@ -386,6 +470,20 @@ shown as `blocked` and omitted from plans.
 `execute` accepts plans from all four planners. It validates the plan hash,
 schema version, provider, instance, action limits, and current resource state.
 Dry run is the default.
+
+| Command/parameter | Required/default | Function |
+|---|---|---|
+| `execute PLAN_FILE` | Plan file required | Load, validate, simulate, or apply a saved JSON plan |
+| `--apply` | Optional; `false` | Perform mutations; without it every action is a dry run |
+| `--non-interactive` | Optional; `false` | Disable prompting; with `--apply`, requires `--confirm-scope` |
+| `--confirm-scope PATH` | Required for non-interactive apply | Must exactly equal the path stored in the plan |
+| `--confirm-out-of-scope-impact N` | Required when runner plan impact is non-zero | Must exactly equal the plan's explicit external-project count |
+| `--max-actions N` | Optional; config limit | Override the absolute guard for this execution |
+| `--max-percentage N` | Accepted for interface compatibility; no execute-time effect | Percentage needs the discovery total and is enforced during planning only |
+| global `--audit-log FILE` | Optional | Append one JSONL record per outcome, including dry-run outcomes |
+
+`execution.revalidate` and `execution.fail_fast` are configuration-only; their
+safe defaults are `true` and `false` respectively.
 
 ```bash
 # Simulate every action:
