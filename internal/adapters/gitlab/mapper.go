@@ -131,17 +131,22 @@ func baseUserFields(u *gitlab.User) domain.User {
 	}
 }
 
-// mapRunner maps a runner's details plus its full project list into a
-// domain.Runner, splitting that project list into in-scope/out-of-scope
+// mapRunner maps runner details plus explicit project assignments into a
+// domain.Runner, splitting that list into in-scope/out-of-scope
 // by comparing against inScopeProjectIDs (the set of project IDs the
 // current evaluation actually covers) - this is what makes the
-// shared-runner blast radius visible.
-func mapRunner(d *gitlab.RunnerDetails, inScopeProjectIDs map[string]bool) domain.Runner {
+// assignments. assessRunnerImpact separately handles implicit group and
+// instance reach, which cannot be inferred from Projects alone.
+func mapRunner(d *gitlab.RunnerDetails, scope domain.Scope, inScopeProjectIDs map[string]bool) domain.Runner {
 	r := domain.Runner{
 		ID:          strconv.FormatInt(d.ID, 10),
 		Description: d.Description,
 		TagList:     append([]string{}, d.TagList...),
 		Shared:      d.IsShared,
+		RunnerType:  d.RunnerType,
+	}
+	for _, g := range d.Groups {
+		r.OwnerGroupIDs = append(r.OwnerGroupIDs, strconv.FormatInt(g.ID, 10))
 	}
 	for _, p := range d.Projects {
 		id := strconv.FormatInt(p.ID, 10)
@@ -151,7 +156,43 @@ func mapRunner(d *gitlab.RunnerDetails, inScopeProjectIDs map[string]bool) domai
 			r.OutOfScopeProjectPaths = append(r.OutOfScopeProjectPaths, p.PathWithNamespace)
 		}
 	}
+	assessRunnerImpact(&r, scope)
 	return r
+}
+
+func assessRunnerImpact(r *domain.Runner, scope domain.Scope) {
+	switch r.RunnerType {
+	case "project_type":
+		if len(r.InScopeProjectPaths) == 0 {
+			r.ImpactReason = "project runner is no longer assigned to any project in the evaluated scope"
+			return
+		}
+		r.ImpactKnown = true // project assignments are explicit in RunnerDetails.Projects
+	case "group_type":
+		if !scope.Recursive {
+			r.ImpactReason = "group runners also reach descendant subgroups; rerun against the owning group with --recursive"
+			return
+		}
+		if len(r.OwnerGroupIDs) == 0 {
+			r.ImpactReason = "runner owner group was not returned by GitLab"
+			return
+		}
+		inScopeGroups := map[string]bool{}
+		for _, id := range scope.GroupIDs {
+			inScopeGroups[id] = true
+		}
+		for _, id := range r.OwnerGroupIDs {
+			if !inScopeGroups[id] {
+				r.ImpactReason = "runner is inherited from an ancestor group outside the evaluated scope"
+				return
+			}
+		}
+		r.ImpactKnown = true
+	case "instance_type":
+		r.ImpactReason = "instance runner impact is instance-wide and cannot be proven from a group-scoped query"
+	default:
+		r.ImpactReason = "unknown GitLab runner type " + strconv.Quote(r.RunnerType)
+	}
 }
 
 func mapUserMembership(m *gitlab.UserMembership) domain.Membership {

@@ -133,13 +133,21 @@ func (f *fakeClient) ProposePipelineTagChange(_ context.Context, projectID strin
 	f.proposedTags[projectID] = tag
 	return f.proposeURL, nil
 }
-func (f *fakeClient) ListRunnersForProjects(context.Context, []string) ([]domain.Runner, error) {
+func (f *fakeClient) ListRunnersForProjects(context.Context, domain.Scope, []string) ([]domain.Runner, error) {
 	return f.runners, f.runnersErr
+}
+func (f *fakeClient) GetRunnerForProjects(_ context.Context, runnerID string, _ domain.Scope, _ []string) (domain.Runner, error) {
+	for _, runner := range f.runners {
+		if runner.ID == runnerID {
+			return runner, nil
+		}
+	}
+	return domain.Runner{}, provider.NewError(provider.KindNotFound, "get runner", "not found", nil)
 }
 func (f *fakeClient) GetRunnerTags(_ context.Context, runnerID string) ([]string, error) {
 	return f.runnerTags[runnerID], nil
 }
-func (f *fakeClient) UpdateRunnerTags(_ context.Context, runnerID string, tags []string) error {
+func (f *fakeClient) UpdateRunnerTags(_ context.Context, runnerID string, _ []string, tags []string) error {
 	f.runnerTags[runnerID] = tags
 	return nil
 }

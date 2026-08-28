@@ -42,28 +42,46 @@ operator never intended to touch.
   project) is never inspected or modified. `ciyaml.HasIncludes` flags this
   as a warning reason on any matched project, so an operator knows the
   file may have jobs this pass could not see.
-- Changes are **always** proposed as a Merge Request - a new branch, one
-  commit, one MR per project - never a direct commit to the default
+- GitLab's two-document component form is supported: a leading `spec:`
+  header and the configuration after `---` are decoded separately, and only
+  the configuration document is patched. Any other multi-document shape is
+  rejected rather than risking silent truncation.
+- Changes are **always** proposed as a Merge Request - a content-addressed
+  branch and one MR per project - never a direct commit to the default
   branch. Nothing in this tool merges that MR; a human always reviews the
   diff and merges it themselves. This is the primary mitigation for the
   inherent risk of programmatically editing CI configuration: the review
   step that would catch a bad patch happens in GitLab's own MR diff view,
   not in this tool's output.
+- The branch includes a digest of the patched content. Existing matching
+  branch content and an open MR are reused, so retries after partial failure
+  are idempotent instead of conflicting forever.
 - Revalidation is structural, not a separate check: execution always
   re-fetches the current file and re-runs the patch immediately before
   proposing a change, so a file edited since planning (or a tag already
   merged by a previous run) is handled correctly by construction rather
   than by a bolted-on staleness check.
+- Project identity/path and current protection rules are also re-evaluated
+  immediately before the proposal, so protection changes after planning win.
 
 **Runner tags (`runners` command):**
 
 - GitLab's Runner API replaces a runner's `tag_list` wholesale (it is not
-  additive), so this tool always fetches the current list immediately
-  before updating and submits the union with the desired tag.
-- Every runner report (`runners list`/`evaluate`/`plan`) shows the full
-  blast radius: every project using that runner, not just the ones in the
-  evaluated scope, split into in-scope and out-of-scope
-  (`domain.Runner.OutOfScopeProjectPaths`).
+  additive), so this tool fetches the current list, computes the union, then
+  performs a final expected-list comparison immediately before updating. A
+  tag change detected by that preflight comparison returns a conflict. GitLab
+  exposes no atomic compare-and-swap for the following whole-list PUT, leaving
+  a narrow external race that the adapter cannot eliminate.
+- GitLab's per-project runner endpoint lists all runners **available** to a
+  project, including inherited group and instance runners. It is not treated
+  as proof that jobs actually used a runner.
+- `RunnerDetails.Projects` is used only for explicit project assignments,
+  split into in-scope and out-of-scope paths. It is not claimed to enumerate
+  implicit group or instance reach.
+- A project runner is plannable when it remains explicitly assigned to an
+  in-scope project. A group runner is plannable only when its owning group is
+  inside a recursively resolved scope. An inherited ancestor-group runner,
+  instance runner, or unknown type fails closed and is shown as `blocked`.
 - `execute --apply` refuses to run a plan containing any runner-tag action
   with a non-zero out-of-scope impact unless
   `--confirm-out-of-scope-impact=<N>` is passed, where N must exactly
@@ -72,6 +90,9 @@ operator never intended to touch.
   which is a non-interactive-only guard) - the risk of affecting an
   unrelated project's pipeline is independent of how the command happens
   to be invoked.
+- Immediately before mutation, execution re-resolves the group and project
+  set, re-fetches runner details, and compares live out-of-scope paths to the
+  confirmed plan. Any difference requires a newly reviewed plan.
 
 ## Consequences
 

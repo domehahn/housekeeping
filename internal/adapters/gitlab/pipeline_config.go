@@ -1,7 +1,9 @@
 package gitlab
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"regexp"
@@ -42,16 +44,11 @@ func (a *Adapter) GetPipelineConfig(ctx context.Context, projectID string) ([]by
 
 // ProposePipelineTagChange opens a branch off the project's default
 // branch, commits patchedContent as the new .gitlab-ci.yml on it, and
-// opens a Merge Request back to the default branch. It never commits
-// directly to the default branch - see
+// opens or reuses a Merge Request back to the default branch. The branch name
+// includes a content digest, and every step is safe to retry after a partial
+// failure. It never commits directly to the default branch - see
 // docs/adr/0005-ci-tag-management-scope.md. Returns the created MR's web
 // URL.
-//
-// If the branch already exists (a 409 from CreateBranch), that is
-// classified as provider.KindConflict rather than treated as a hard
-// failure - it almost always means a previous run already proposed this
-// exact change, and the executor treats a conflict here as
-// "already done."
 func (a *Adapter) ProposePipelineTagChange(ctx context.Context, projectID string, patchedContent []byte, tag string) (string, error) {
 	proj, _, err := a.gl.Projects.GetProject(projectID, &gitlab.GetProjectOptions{}, gitlab.WithContext(ctx))
 	if err != nil {
@@ -61,24 +58,16 @@ func (a *Adapter) ProposePipelineTagChange(ctx context.Context, projectID string
 		return "", fmt.Errorf("gitlab: project %s has no default branch (empty repository)", projectID)
 	}
 
-	branchName := "scm-cleaner/add-tag-" + slugifyTag(tag)
-	_, _, err = a.gl.Branches.CreateBranch(projectID, &gitlab.CreateBranchOptions{
-		Branch: &branchName,
-		Ref:    &proj.DefaultBranch,
-	}, gitlab.WithContext(ctx))
-	if err != nil {
-		return "", classify(fmt.Sprintf("create branch %s on project %s", branchName, projectID), err)
+	branchName := proposalBranchName(tag, patchedContent)
+	if err := a.ensureProposalBranch(ctx, projectID, branchName, proj.DefaultBranch); err != nil {
+		return "", err
 	}
 
-	content := string(patchedContent)
-	commitMsg := fmt.Sprintf("scm-cleaner: add CI tag %q to .gitlab-ci.yml", tag)
-	_, _, err = a.gl.RepositoryFiles.UpdateFile(projectID, gitlabCIFilePath, &gitlab.UpdateFileOptions{
-		Branch:        &branchName,
-		Content:       &content,
-		CommitMessage: &commitMsg,
-	}, gitlab.WithContext(ctx))
-	if err != nil {
-		return "", classify(fmt.Sprintf("update %s on branch %s of project %s", gitlabCIFilePath, branchName, projectID), err)
+	if err := a.ensureProposalContent(ctx, projectID, branchName, patchedContent, tag); err != nil {
+		return "", err
+	}
+	if url, ok, err := a.findOpenProposal(ctx, projectID, branchName, proj.DefaultBranch); err != nil || ok {
+		return url, err
 	}
 
 	title := fmt.Sprintf("scm-cleaner: add CI tag %q", tag)
@@ -97,9 +86,82 @@ func (a *Adapter) ProposePipelineTagChange(ctx context.Context, projectID string
 		RemoveSourceBranch: gitlab.Ptr(true),
 	}, gitlab.WithContext(ctx))
 	if err != nil {
-		return "", classify(fmt.Sprintf("create merge request from %s on project %s", branchName, projectID), err)
+		classified := classify(fmt.Sprintf("create merge request from %s on project %s", branchName, projectID), err)
+		var pErr *provider.Error
+		if errors.As(classified, &pErr) && pErr.Kind == provider.KindConflict {
+			if url, ok, findErr := a.findOpenProposal(ctx, projectID, branchName, proj.DefaultBranch); findErr == nil && ok {
+				return url, nil
+			}
+		}
+		return "", classified
 	}
 	return mr.WebURL, nil
+}
+
+func proposalBranchName(tag string, content []byte) string {
+	sum := sha256.Sum256(content)
+	slug := slugifyTag(tag)
+	if len(slug) > 40 {
+		slug = slug[:40]
+	}
+	return fmt.Sprintf("scm-cleaner/add-tag-%s-%x", slug, sum[:6])
+}
+
+func (a *Adapter) ensureProposalBranch(ctx context.Context, projectID, branchName, defaultBranch string) error {
+	_, _, err := a.gl.Branches.GetBranch(projectID, branchName, gitlab.WithContext(ctx))
+	if err == nil {
+		return nil
+	}
+	classified := classify("get proposal branch "+branchName, err)
+	var pErr *provider.Error
+	if !errors.As(classified, &pErr) || pErr.Kind != provider.KindNotFound {
+		return classified
+	}
+	_, _, err = a.gl.Branches.CreateBranch(projectID, &gitlab.CreateBranchOptions{Branch: &branchName, Ref: &defaultBranch}, gitlab.WithContext(ctx))
+	if err != nil {
+		classified = classify(fmt.Sprintf("create branch %s on project %s", branchName, projectID), err)
+		// A concurrent/retried invocation may create the deterministic branch
+		// between our GET and POST. Its content is verified in the next step.
+		if errors.As(classified, &pErr) && pErr.Kind == provider.KindConflict {
+			return nil
+		}
+		return classified
+	}
+	return nil
+}
+
+func (a *Adapter) ensureProposalContent(ctx context.Context, projectID, branchName string, patchedContent []byte, tag string) error {
+	current, _, err := a.gl.RepositoryFiles.GetRawFile(projectID, gitlabCIFilePath, &gitlab.GetRawFileOptions{Ref: &branchName}, gitlab.WithContext(ctx))
+	if err != nil {
+		return classify(fmt.Sprintf("read %s on branch %s", gitlabCIFilePath, branchName), err)
+	}
+	if bytes.Equal(current, patchedContent) {
+		return nil
+	}
+	content := string(patchedContent)
+	commitMsg := fmt.Sprintf("scm-cleaner: add CI tag %q to .gitlab-ci.yml", tag)
+	_, _, err = a.gl.RepositoryFiles.UpdateFile(projectID, gitlabCIFilePath, &gitlab.UpdateFileOptions{
+		Branch: &branchName, Content: &content, CommitMessage: &commitMsg,
+	}, gitlab.WithContext(ctx))
+	if err != nil {
+		return classify(fmt.Sprintf("update %s on branch %s of project %s", gitlabCIFilePath, branchName, projectID), err)
+	}
+	return nil
+}
+
+func (a *Adapter) findOpenProposal(ctx context.Context, projectID, sourceBranch, targetBranch string) (string, bool, error) {
+	state := "opened"
+	mrs, _, err := a.gl.MergeRequests.ListProjectMergeRequests(projectID, &gitlab.ListProjectMergeRequestsOptions{
+		State: &state, SourceBranch: &sourceBranch, TargetBranch: &targetBranch,
+		ListOptions: gitlab.ListOptions{PerPage: 1},
+	}, gitlab.WithContext(ctx))
+	if err != nil {
+		return "", false, classify("find existing pipeline-tag merge request", err)
+	}
+	if len(mrs) == 0 {
+		return "", false, nil
+	}
+	return mrs[0].WebURL, true, nil
 }
 
 var nonSlugChars = regexp.MustCompile(`[^a-z0-9-]+`)

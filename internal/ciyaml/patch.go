@@ -28,6 +28,7 @@ package ciyaml
 import (
 	"bytes"
 	"fmt"
+	"io"
 
 	"gopkg.in/yaml.v3"
 )
@@ -58,6 +59,7 @@ var reservedTopLevelKeys = map[string]bool{
 	"include":       true,
 	"image":         true,
 	"services":      true,
+	"spec":          true,
 	"stages":        true,
 	"variables":     true,
 	"workflow":      true,
@@ -80,11 +82,11 @@ func AddTag(content []byte, tag string) (patched []byte, changes []Change, err e
 		return nil, nil, fmt.Errorf("ciyaml: tag must not be empty")
 	}
 
-	var doc yaml.Node
-	if err := yaml.Unmarshal(content, &doc); err != nil {
-		return nil, nil, fmt.Errorf("ciyaml: parse YAML: %w", err)
+	docs, configDoc, err := decodeGitLabDocuments(content)
+	if err != nil {
+		return nil, nil, err
 	}
-	root, err := rootMapping(&doc)
+	root, err := rootMapping(configDoc)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -109,7 +111,7 @@ func AddTag(content []byte, tag string) (patched []byte, changes []Change, err e
 		return content, nil, nil
 	}
 
-	out, err := marshalNode(&doc)
+	out, err := marshalDocuments(docs)
 	if err != nil {
 		return nil, nil, fmt.Errorf("ciyaml: encode patched document: %w", err)
 	}
@@ -122,16 +124,54 @@ func AddTag(content []byte, tag string) (patched []byte, changes []Change, err e
 // have already successfully handled (or are about to report) the parse
 // error through AddTag.
 func HasIncludes(content []byte) bool {
-	var doc yaml.Node
-	if err := yaml.Unmarshal(content, &doc); err != nil {
+	_, configDoc, err := decodeGitLabDocuments(content)
+	if err != nil {
 		return false
 	}
-	root, err := rootMapping(&doc)
+	root, err := rootMapping(configDoc)
 	if err != nil {
 		return false
 	}
 	_, _, found := findMapEntry(root, "include")
 	return found
+}
+
+// decodeGitLabDocuments accepts both the usual single CI document and
+// GitLab's two-document header form (`spec: ...`, `---`, configuration).
+// Rejecting any other multi-document shape is intentional: silently choosing
+// one document could discard CI configuration when the result is encoded.
+func decodeGitLabDocuments(content []byte) (docs []*yaml.Node, configDoc *yaml.Node, err error) {
+	dec := yaml.NewDecoder(bytes.NewReader(content))
+	for {
+		var doc yaml.Node
+		if decodeErr := dec.Decode(&doc); decodeErr != nil {
+			if decodeErr == io.EOF {
+				break
+			}
+			return nil, nil, fmt.Errorf("ciyaml: parse YAML: %w", decodeErr)
+		}
+		if len(doc.Content) == 0 {
+			continue
+		}
+		docs = append(docs, &doc)
+	}
+	if len(docs) == 0 {
+		return nil, nil, fmt.Errorf("ciyaml: document is empty")
+	}
+	if len(docs) == 1 {
+		return docs, docs[0], nil
+	}
+	if len(docs) != 2 {
+		return nil, nil, fmt.Errorf("ciyaml: unsupported YAML stream with %d documents", len(docs))
+	}
+	header, headerErr := rootMapping(docs[0])
+	if headerErr != nil {
+		return nil, nil, fmt.Errorf("ciyaml: invalid header document: %w", headerErr)
+	}
+	if _, _, found := findMapEntry(header, "spec"); !found {
+		return nil, nil, fmt.Errorf("ciyaml: multiple YAML documents require a leading GitLab spec: header")
+	}
+	return docs, docs[1], nil
 }
 
 // rootMapping returns the document's root mapping node, erroring if the
@@ -251,12 +291,14 @@ func scalarKey(s string) *yaml.Node {
 	return &yaml.Node{Kind: yaml.ScalarNode, Value: s}
 }
 
-func marshalNode(doc *yaml.Node) ([]byte, error) {
+func marshalDocuments(docs []*yaml.Node) ([]byte, error) {
 	var buf bytes.Buffer
 	enc := yaml.NewEncoder(&buf)
 	enc.SetIndent(2)
-	if err := enc.Encode(doc); err != nil {
-		return nil, err
+	for _, doc := range docs {
+		if err := enc.Encode(doc); err != nil {
+			return nil, err
+		}
 	}
 	if err := enc.Close(); err != nil {
 		return nil, err

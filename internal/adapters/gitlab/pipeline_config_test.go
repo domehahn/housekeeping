@@ -2,12 +2,9 @@ package gitlab
 
 import (
 	"context"
-	"errors"
 	"net/http"
 	"strings"
 	"testing"
-
-	"github.com/domehahn/housekeeping/internal/provider"
 )
 
 func TestGetPipelineConfig_ReturnsContentWhenFileExists(t *testing.T) {
@@ -79,16 +76,25 @@ func TestGetPipelineConfig_EmptyRepositoryReturnsExistsFalse(t *testing.T) {
 
 func TestProposePipelineTagChange_HappyPath(t *testing.T) {
 	var gotBranchReq, gotFileReq, gotMRReq bool
+	patched := []byte("default:\n  tags:\n    - k8s-runner\n")
 	a := newTestAdapter(t, func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case strings.HasSuffix(r.URL.Path, "/projects/1"):
 			writeJSON(t, w, map[string]any{"id": 1, "default_branch": "main"})
+		case strings.Contains(r.URL.Path, "/repository/branches/") && r.Method == http.MethodGet:
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte(`{"message":"404 Branch Not Found"}`))
 		case strings.Contains(r.URL.Path, "/repository/branches") && r.Method == http.MethodPost:
 			gotBranchReq = true
-			writeJSON(t, w, map[string]any{"name": "scm-cleaner/add-tag-k8s-runner"})
+			writeJSON(t, w, map[string]any{"name": proposalBranchName("k8s-runner", patched)})
+		case strings.Contains(r.URL.Path, "/repository/files/") && r.Method == http.MethodGet:
+			w.Header().Set("Content-Type", "text/plain")
+			_, _ = w.Write([]byte("build-job:\n  script: [x]\n"))
 		case strings.Contains(r.URL.Path, "/repository/files/") && r.Method == http.MethodPut:
 			gotFileReq = true
-			writeJSON(t, w, map[string]any{"file_path": ".gitlab-ci.yml", "branch": "scm-cleaner/add-tag-k8s-runner"})
+			writeJSON(t, w, map[string]any{"file_path": ".gitlab-ci.yml", "branch": proposalBranchName("k8s-runner", patched)})
+		case strings.HasSuffix(r.URL.Path, "/merge_requests") && r.Method == http.MethodGet:
+			writeJSON(t, w, []map[string]any{})
 		case strings.HasSuffix(r.URL.Path, "/merge_requests") && r.Method == http.MethodPost:
 			gotMRReq = true
 			writeJSON(t, w, map[string]any{"iid": 42, "web_url": "https://gitlab.example.com/group/proj/-/merge_requests/42"})
@@ -97,7 +103,7 @@ func TestProposePipelineTagChange_HappyPath(t *testing.T) {
 		}
 	})
 
-	url, err := a.ProposePipelineTagChange(context.Background(), "1", []byte("default:\n  tags:\n    - k8s-runner\n"), "k8s-runner")
+	url, err := a.ProposePipelineTagChange(context.Background(), "1", patched, "k8s-runner")
 	if err != nil {
 		t.Fatalf("ProposePipelineTagChange: %v", err)
 	}
@@ -109,26 +115,35 @@ func TestProposePipelineTagChange_HappyPath(t *testing.T) {
 	}
 }
 
-func TestProposePipelineTagChange_BranchAlreadyExistsClassifiedAsConflict(t *testing.T) {
+func TestProposePipelineTagChange_RetryReusesExistingBranchAndMergeRequest(t *testing.T) {
+	patched := []byte("default:\n  tags: [k8s-runner]\n")
+	putOrPostCalled := false
 	a := newTestAdapter(t, func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case strings.HasSuffix(r.URL.Path, "/projects/1"):
 			writeJSON(t, w, map[string]any{"id": 1, "default_branch": "main"})
-		case strings.Contains(r.URL.Path, "/repository/branches"):
-			w.WriteHeader(http.StatusConflict)
-			_, _ = w.Write([]byte(`{"message":"Branch already exists"}`))
+		case strings.Contains(r.URL.Path, "/repository/branches/"):
+			writeJSON(t, w, map[string]any{"name": proposalBranchName("k8s-runner", patched)})
+		case strings.Contains(r.URL.Path, "/repository/files/") && r.Method == http.MethodGet:
+			w.Header().Set("Content-Type", "text/plain")
+			_, _ = w.Write(patched)
+		case strings.HasSuffix(r.URL.Path, "/merge_requests") && r.Method == http.MethodGet:
+			writeJSON(t, w, []map[string]any{{"iid": 42, "web_url": "https://gitlab.example.com/group/proj/-/merge_requests/42"}})
 		default:
-			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
+			putOrPostCalled = true
+			writeJSON(t, w, map[string]any{})
 		}
 	})
 
-	_, err := a.ProposePipelineTagChange(context.Background(), "1", []byte("x: y\n"), "k8s-runner")
-	if err == nil {
-		t.Fatal("expected an error")
+	url, err := a.ProposePipelineTagChange(context.Background(), "1", patched, "k8s-runner")
+	if err != nil {
+		t.Fatalf("expected retry to succeed, got %v", err)
 	}
-	var pErr *provider.Error
-	if !errors.As(err, &pErr) || pErr.Kind != provider.KindConflict {
-		t.Errorf("expected KindConflict, got %v", err)
+	if url != "https://gitlab.example.com/group/proj/-/merge_requests/42" {
+		t.Fatalf("unexpected existing MR URL %q", url)
+	}
+	if putOrPostCalled {
+		t.Fatal("retry must not update content or create a duplicate merge request")
 	}
 }
 

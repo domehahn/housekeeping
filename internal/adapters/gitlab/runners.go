@@ -3,20 +3,23 @@ package gitlab
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strconv"
 	"sync"
 
 	gitlab "gitlab.com/gitlab-org/api/client-go"
 
 	"github.com/domehahn/housekeeping/internal/domain"
+	"github.com/domehahn/housekeeping/internal/provider"
 )
 
-// ListRunnersForProjects lists every runner used by the given projects,
-// de-duplicated by runner ID, each annotated with its full blast radius
-// (every project using it, in-scope or not - see mapRunner). Per-project
+// ListRunnersForProjects lists every runner available to the given projects,
+// including inherited group and instance runners, de-duplicated by runner ID.
+// Results include explicit project assignments and a conservative proof of
+// whether their effective reach is contained by scope (see mapRunner). Per-project
 // runner listing is fanned out with bounded concurrency (Adapter.workers),
 // the same pattern used for admin activity enrichment in users.go.
-func (a *Adapter) ListRunnersForProjects(ctx context.Context, projectIDs []string) ([]domain.Runner, error) {
+func (a *Adapter) ListRunnersForProjects(ctx context.Context, scope domain.Scope, projectIDs []string) ([]domain.Runner, error) {
 	inScope := make(map[string]bool, len(projectIDs))
 	for _, id := range projectIDs {
 		inScope[id] = true
@@ -53,7 +56,7 @@ func (a *Adapter) ListRunnersForProjects(ctx context.Context, projectIDs []strin
 				}
 				return
 			}
-			runners = append(runners, mapRunner(details, inScope))
+			runners = append(runners, mapRunner(details, scope, inScope))
 		}(id)
 	}
 	wg.Wait()
@@ -64,7 +67,26 @@ func (a *Adapter) ListRunnersForProjects(ctx context.Context, projectIDs []strin
 	return runners, nil
 }
 
-// collectRunnerIDs lists the runners enabled for each project and returns
+// GetRunnerForProjects re-fetches one runner and re-computes its scope impact
+// immediately before mutation. It is intentionally separate from tag reads:
+// project/group associations can change while a plan waits for review.
+func (a *Adapter) GetRunnerForProjects(ctx context.Context, runnerID string, scope domain.Scope, projectIDs []string) (domain.Runner, error) {
+	rid, err := strconv.ParseInt(runnerID, 10, 64)
+	if err != nil {
+		return domain.Runner{}, fmt.Errorf("gitlab: invalid runner ID %q: %w", runnerID, err)
+	}
+	details, _, err := a.gl.Runners.GetRunnerDetails(rid, gitlab.WithContext(ctx))
+	if err != nil {
+		return domain.Runner{}, classify("get details of runner "+runnerID, err)
+	}
+	inScope := make(map[string]bool, len(projectIDs))
+	for _, id := range projectIDs {
+		inScope[id] = true
+	}
+	return mapRunner(details, scope, inScope), nil
+}
+
+// collectRunnerIDs lists the runners available to each project and returns
 // the de-duplicated set of runner IDs across all of them.
 func (a *Adapter) collectRunnerIDs(ctx context.Context, projectIDs []string) (map[int64]bool, error) {
 	ids := map[int64]bool{}
@@ -109,11 +131,21 @@ func (a *Adapter) GetRunnerTags(ctx context.Context, runnerID string) ([]string,
 
 // UpdateRunnerTags replaces a runner's tag list wholesale - GitLab's API
 // is not additive, so callers must pass the full desired list (typically
-// the current list plus the new tag).
-func (a *Adapter) UpdateRunnerTags(ctx context.Context, runnerID string, tags []string) error {
+// the current list plus the new tag). expectedTags provides a final
+// best-effort conflict check; GitLab exposes no atomic compare-and-swap for
+// the remaining interval between that GET and the PUT.
+func (a *Adapter) UpdateRunnerTags(ctx context.Context, runnerID string, expectedTags, tags []string) error {
 	rid, err := strconv.ParseInt(runnerID, 10, 64)
 	if err != nil {
 		return fmt.Errorf("gitlab: invalid runner ID %q: %w", runnerID, err)
+	}
+	details, _, err := a.gl.Runners.GetRunnerDetails(rid, gitlab.WithContext(ctx))
+	if err != nil {
+		return classify("re-check tags of runner "+runnerID, err)
+	}
+	if !sameTags(details.TagList, expectedTags) {
+		return provider.NewError(provider.KindConflict, "update tags of runner "+runnerID,
+			"runner tags changed concurrently; refusing to overwrite them", nil)
 	}
 	_, _, err = a.gl.Runners.UpdateRunnerDetails(rid, &gitlab.UpdateRunnerDetailsOptions{
 		TagList: &tags,
@@ -122,4 +154,11 @@ func (a *Adapter) UpdateRunnerTags(ctx context.Context, runnerID string, tags []
 		return classify("update tags of runner "+runnerID, err)
 	}
 	return nil
+}
+
+func sameTags(a, b []string) bool {
+	aCopy, bCopy := append([]string{}, a...), append([]string{}, b...)
+	slices.Sort(aCopy)
+	slices.Sort(bCopy)
+	return slices.Equal(aCopy, bCopy)
 }

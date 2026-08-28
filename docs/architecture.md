@@ -262,6 +262,15 @@ fetching the file and opening the Merge Request). See
 decisions (what gets patched, what's deliberately left alone, why runner
 tag changes require an extra confirmation).
 
+The CI parser understands GitLab's optional leading `spec:` header document
+and patches only the following configuration document. Runner discovery uses
+GitLab's project endpoint as an availability list. The adapter distinguishes
+project, group, inherited-group, and instance reach; only reach that can be
+proven within the resolved scope is plannable. Execution recomputes this proof
+and uses an expected-tag-list preflight comparison before GitLab's whole-list
+update. The API has no atomic conditional update, so this is deliberately
+documented as a best-effort conflict check rather than a transaction.
+
 ## Provider Extension
 
 Adding a provider means:
