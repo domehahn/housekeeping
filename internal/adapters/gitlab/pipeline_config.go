@@ -7,10 +7,12 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"slices"
 	"strings"
 
 	gitlab "gitlab.com/gitlab-org/api/client-go"
 
+	"github.com/domehahn/housekeeping/internal/domain"
 	"github.com/domehahn/housekeeping/internal/provider"
 )
 
@@ -49,7 +51,7 @@ func (a *Adapter) GetPipelineConfig(ctx context.Context, projectID string) ([]by
 // failure. It never commits directly to the default branch - see
 // docs/adr/0005-ci-tag-management-scope.md. Returns the created MR's web
 // URL.
-func (a *Adapter) ProposePipelineTagChange(ctx context.Context, projectID string, patchedContent []byte, tag string) (string, error) {
+func (a *Adapter) ProposePipelineTagChange(ctx context.Context, projectID string, patchedContent []byte, tags []string) (string, error) {
 	proj, _, err := a.gl.Projects.GetProject(projectID, &gitlab.GetProjectOptions{}, gitlab.WithContext(ctx))
 	if err != nil {
 		return "", classify("get project "+projectID, err)
@@ -58,26 +60,27 @@ func (a *Adapter) ProposePipelineTagChange(ctx context.Context, projectID string
 		return "", fmt.Errorf("gitlab: project %s has no default branch (empty repository)", projectID)
 	}
 
-	branchName := proposalBranchName(tag, patchedContent)
+	branchName := proposalBranchName(tags, patchedContent)
 	if err := a.ensureProposalBranch(ctx, projectID, branchName, proj.DefaultBranch); err != nil {
 		return "", err
 	}
 
-	if err := a.ensureProposalContent(ctx, projectID, branchName, patchedContent, tag); err != nil {
+	if err := a.ensureProposalContent(ctx, projectID, branchName, patchedContent, tags); err != nil {
 		return "", err
 	}
 	if url, ok, err := a.findOpenProposal(ctx, projectID, branchName, proj.DefaultBranch); err != nil || ok {
 		return url, err
 	}
 
-	title := fmt.Sprintf("scm-cleaner: add CI tag %q", tag)
+	tagList := strings.Join(canonicalTags(tags), ", ")
+	title := fmt.Sprintf("scm-cleaner: add CI tags %s", tagList)
 	description := fmt.Sprintf(
 		"This Merge Request was proposed by scm-cleaner.\n\n"+
-			"It adds the CI tag `%s` to `default.tags` in `%s`, and to any job "+
+			"It adds the CI tags `%s` to `default.tags` in `%s`, and to any job "+
 			"that already defines its own `tags:` list. Jobs with no `tags:` of "+
 			"their own are left untouched - they already inherit from `default:`.\n\n"+
 			"scm-cleaner never merges this automatically - please review the diff "+
-			"before merging.", tag, gitlabCIFilePath)
+			"before merging.\n\n%s", tagList, gitlabCIFilePath, proposalTagMarker(tags))
 	mr, _, err := a.gl.MergeRequests.CreateMergeRequest(projectID, &gitlab.CreateMergeRequestOptions{
 		Title:              &title,
 		Description:        &description,
@@ -98,13 +101,32 @@ func (a *Adapter) ProposePipelineTagChange(ctx context.Context, projectID string
 	return mr.WebURL, nil
 }
 
-func proposalBranchName(tag string, content []byte) string {
+func proposalBranchName(tags []string, content []byte) string {
 	sum := sha256.Sum256(content)
-	slug := slugifyTag(tag)
+	slug := slugifyTag(strings.Join(canonicalTags(tags), "-"))
 	if len(slug) > 40 {
 		slug = slug[:40]
 	}
 	return fmt.Sprintf("scm-cleaner/add-tag-%s-%x", slug, sum[:6])
+}
+
+func proposalBranchPrefix(tags []string) string {
+	slug := slugifyTag(strings.Join(canonicalTags(tags), "-"))
+	if len(slug) > 40 {
+		slug = slug[:40]
+	}
+	return "scm-cleaner/add-tag-" + slug + "-"
+}
+
+func canonicalTags(tags []string) []string {
+	canonical := append([]string{}, tags...)
+	slices.Sort(canonical)
+	return slices.Compact(canonical)
+}
+
+func proposalTagMarker(tags []string) string {
+	sum := sha256.Sum256([]byte(strings.Join(canonicalTags(tags), "\x00")))
+	return fmt.Sprintf("<!-- scm-cleaner-tags-sha256: %x -->", sum)
 }
 
 func (a *Adapter) ensureProposalBranch(ctx context.Context, projectID, branchName, defaultBranch string) error {
@@ -130,7 +152,7 @@ func (a *Adapter) ensureProposalBranch(ctx context.Context, projectID, branchNam
 	return nil
 }
 
-func (a *Adapter) ensureProposalContent(ctx context.Context, projectID, branchName string, patchedContent []byte, tag string) error {
+func (a *Adapter) ensureProposalContent(ctx context.Context, projectID, branchName string, patchedContent []byte, tags []string) error {
 	current, _, err := a.gl.RepositoryFiles.GetRawFile(projectID, gitlabCIFilePath, &gitlab.GetRawFileOptions{Ref: &branchName}, gitlab.WithContext(ctx))
 	if err != nil {
 		return classify(fmt.Sprintf("read %s on branch %s", gitlabCIFilePath, branchName), err)
@@ -139,7 +161,7 @@ func (a *Adapter) ensureProposalContent(ctx context.Context, projectID, branchNa
 		return nil
 	}
 	content := string(patchedContent)
-	commitMsg := fmt.Sprintf("scm-cleaner: add CI tag %q to .gitlab-ci.yml", tag)
+	commitMsg := fmt.Sprintf("scm-cleaner: add CI tags %s to .gitlab-ci.yml", strings.Join(canonicalTags(tags), ", "))
 	_, _, err = a.gl.RepositoryFiles.UpdateFile(projectID, gitlabCIFilePath, &gitlab.UpdateFileOptions{
 		Branch: &branchName, Content: &content, CommitMessage: &commitMsg,
 	}, gitlab.WithContext(ctx))
@@ -147,6 +169,59 @@ func (a *Adapter) ensureProposalContent(ctx context.Context, projectID, branchNa
 		return classify(fmt.Sprintf("update %s on branch %s of project %s", gitlabCIFilePath, branchName, projectID), err)
 	}
 	return nil
+}
+
+// GetMergedPipelineConfig returns GitLab's read-only, include-expanded CI
+// configuration at the default branch.
+func (a *Adapter) GetMergedPipelineConfig(ctx context.Context, projectID string) ([]byte, []domain.PipelineInclude, error) {
+	includeJobs := true
+	result, _, err := a.gl.Validate.ProjectLint(projectID, &gitlab.ProjectLintOptions{IncludeJobs: &includeJobs}, gitlab.WithContext(ctx))
+	if err != nil {
+		return nil, nil, classify("get merged CI configuration for project "+projectID, err)
+	}
+	if !result.Valid {
+		return nil, nil, provider.NewError(provider.KindValidation, "get merged CI configuration", strings.Join(result.Errors, "; "), nil)
+	}
+	includes := make([]domain.PipelineInclude, 0, len(result.Includes))
+	for _, include := range result.Includes {
+		includes = append(includes, domain.PipelineInclude{
+			Type: include.Type, Location: include.Location, ContextProject: include.ContextProject, ContextSHA: include.ContextSHA,
+		})
+	}
+	return []byte(result.MergedYaml), includes, nil
+}
+
+// ListPipelineTagProposals lists every scm-cleaner proposal matching the
+// deterministic branch prefix for the requested tag set.
+func (a *Adapter) ListPipelineTagProposals(ctx context.Context, projectID string, tags []string) ([]domain.PipelineProposal, error) {
+	state, search := "all", "scm-cleaner"
+	orderBy, sortOrder := "updated_at", "desc"
+	prefix := proposalBranchPrefix(tags)
+	marker := proposalTagMarker(tags)
+	page := int64(1)
+	var proposals []domain.PipelineProposal
+	for {
+		mrs, resp, err := a.gl.MergeRequests.ListProjectMergeRequests(projectID, &gitlab.ListProjectMergeRequestsOptions{
+			State: &state, Search: &search, OrderBy: &orderBy, Sort: &sortOrder,
+			ListOptions: gitlab.ListOptions{Page: page, PerPage: 100},
+		}, gitlab.WithContext(ctx))
+		if err != nil {
+			return nil, classify("list pipeline-tag merge requests for project "+projectID, err)
+		}
+		for _, mr := range mrs {
+			legacySingleTagTitle := len(tags) == 1 && mr.Title == fmt.Sprintf("scm-cleaner: add CI tag %q", tags[0])
+			if strings.HasPrefix(mr.SourceBranch, prefix) && (strings.Contains(mr.Description, marker) || legacySingleTagTitle) {
+				proposals = append(proposals, domain.PipelineProposal{
+					ProjectID: projectID, Title: mr.Title, State: mr.State, SourceBranch: mr.SourceBranch, URL: mr.WebURL,
+				})
+			}
+		}
+		if resp == nil || resp.NextPage == 0 {
+			break
+		}
+		page = resp.NextPage
+	}
+	return proposals, nil
 }
 
 func (a *Adapter) findOpenProposal(ctx context.Context, projectID, sourceBranch, targetBranch string) (string, bool, error) {

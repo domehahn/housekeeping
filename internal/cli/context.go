@@ -45,6 +45,9 @@ type env struct {
 	format         output.Format
 	clock          domain.Clock
 	secretResolver secrets.Resolver
+	keyringStore   secrets.KeyringStore
+	currentOSUser  secrets.CurrentUser
+	secretPrompt   func(string) (string, error)
 	ctx            context.Context
 
 	// client is created lazily by requireClient() since commands like
@@ -113,6 +116,9 @@ func (e *env) loadConfig() error {
 			return exitErr(ExitInvalidConfiguration, err)
 		}
 		e.secretResolver = resolver
+	}
+	if e.keyringStore == nil {
+		e.keyringStore = secrets.NewNativeKeyringStore()
 	}
 	return nil
 }

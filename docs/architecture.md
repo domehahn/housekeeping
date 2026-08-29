@@ -62,10 +62,15 @@ is returned immediately; there is no cross-source fallback, secret caching, or
 global mutable resolver.
 
 The environment backend wraps an injectable lookup function. The keychain
-backend wraps only `Get(service, account)` from `zalando/go-keyring`; production
+backend wraps `Get`, `Set`, and `Delete` from `zalando/go-keyring`; production
 uses macOS Keychain, Linux/BSD Secret Service, or Windows Credential Manager,
 while unit tests inject a fake and never access the real store. If account is
 omitted, the current OS username is resolved at lookup time.
+
+Normal configuration/provider startup remains read-only. Only explicit
+`auth login` and `auth logout` commands write/delete a keychain entry;
+`auth status` performs an existence check without displaying the secret.
+`auth login` reads from a no-echo terminal prompt and accepts no token flag.
 
 Configuration normalizes both the structured `token` block and legacy
 `token_env` into the same reference. `internal/providerfactory` receives the
@@ -269,7 +274,7 @@ section.
 ## CI Tag Management
 
 Two more resource types exist alongside project/user cleanup:
-`pipeline_config` (adding a CI tag to a project's `.gitlab-ci.yml`, via a
+`pipeline_config` (adding one or more CI tags to a project's `.gitlab-ci.yml`, via a
 Merge Request) and `runner` (adding a CI tag to a runner's `tag_list`,
 which can affect projects outside the evaluated scope if the runner is
 shared). Both use the exact same discover -> evaluate -> plan -> review ->
@@ -288,6 +293,20 @@ fetching the file and opening the Merge Request). See
 [ADR 0005](adr/0005-ci-tag-management-scope.md) for the full scope
 decisions (what gets patched, what's deliberately left alone, why runner
 tag changes require an extra confirmation).
+
+Pipeline selection applies repeatable include/exclude regular expressions to
+the full project path, with exclusions taking precedence. Multi-tag actions
+are atomic in plan schema version 3; version-2 single-tag plans remain
+loadable. A large proposal rollout can be deterministically split by project
+path/ID into independently hashed plans. Each batch retains the absolute
+safety guard while the unsplit selection is checked against the percentage
+guard, so batching is not a safety bypass.
+
+Two read-only provider capabilities complement mutation. The GitLab adapter's
+CI-lint call returns `merged_yaml` plus include metadata for effective tag
+analysis, while its Merge Request reporter returns proposal states ordered by
+latest update. Neither capability changes repository content. Included source
+files remain outside the mutation boundary.
 
 The CI parser understands GitLab's optional leading `spec:` header document
 and patches only the following configuration document. Runner discovery uses

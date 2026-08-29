@@ -93,7 +93,7 @@ type UserMembershipReader interface {
 
 // PipelineConfigProposer reads a project's .gitlab-ci.yml at its default
 // branch and, if a change is needed, opens a Merge Request proposing a CI
-// tag addition. It never commits directly to the default branch - see
+// tag additions. It never commits directly to the default branch - see
 // docs/adr/0005-ci-tag-management-scope.md.
 type PipelineConfigProposer interface {
 	// GetPipelineConfig fetches a project's .gitlab-ci.yml at its default
@@ -101,11 +101,23 @@ type PipelineConfigProposer interface {
 	// has no CI file - that is a normal, expected case, not a failure.
 	GetPipelineConfig(ctx context.Context, projectID string) (content []byte, exists bool, err error)
 	// ProposePipelineTagChange opens a branch + commit + Merge Request
-	// proposing patchedContent as the new .gitlab-ci.yml. tag is used only
+	// proposing patchedContent as the new .gitlab-ci.yml. tags are used only
 	// for the branch name/commit message/MR description, not re-validated
 	// here - callers must have already confirmed patchedContent actually
 	// differs from the current file.
-	ProposePipelineTagChange(ctx context.Context, projectID string, patchedContent []byte, tag string) (mergeRequestURL string, err error)
+	ProposePipelineTagChange(ctx context.Context, projectID string, patchedContent []byte, tags []string) (mergeRequestURL string, err error)
+}
+
+// PipelineConfigAnalyzer returns GitLab's effective, include-expanded CI
+// configuration. It is read-only and never implies that included sources can
+// safely be modified.
+type PipelineConfigAnalyzer interface {
+	GetMergedPipelineConfig(ctx context.Context, projectID string) (content []byte, includes []domain.PipelineInclude, err error)
+}
+
+// PipelineProposalReporter reports scm-cleaner Merge Requests for a project.
+type PipelineProposalReporter interface {
+	ListPipelineTagProposals(ctx context.Context, projectID string, tags []string) ([]domain.PipelineProposal, error)
 }
 
 // RunnerScanner lists runners available to a set of projects. Results include
@@ -161,6 +173,8 @@ type Client interface {
 	BillableMembersReader
 	UserMembershipReader
 	PipelineConfigProposer
+	PipelineConfigAnalyzer
+	PipelineProposalReporter
 	RunnerScanner
 	RunnerTagUpdater
 }

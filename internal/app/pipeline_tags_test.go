@@ -22,7 +22,7 @@ func (f *fakePipelineConfigReader) GetPipelineConfig(_ context.Context, projectI
 	return content, ok, nil
 }
 
-func (f *fakePipelineConfigReader) ProposePipelineTagChange(context.Context, string, []byte, string) (string, error) {
+func (f *fakePipelineConfigReader) ProposePipelineTagChange(context.Context, string, []byte, []string) (string, error) {
 	return "", nil
 }
 
@@ -43,7 +43,7 @@ func TestEvaluatePipelineTags_ClassifiesEveryStatus(t *testing.T) {
 		{ID: "5", FullPath: "g/e"},
 	}
 
-	summary := EvaluatePipelineTags(context.Background(), reader, projects, "k8s-runner", nil, 2)
+	summary := EvaluatePipelineTags(context.Background(), reader, projects, []string{"k8s-runner"}, nil, 2)
 
 	statuses := map[string]PipelineTagStatus{}
 	for _, r := range summary.Results {
@@ -77,7 +77,7 @@ func TestEvaluatePipelineTags_ProtectionExcludesFromMatch(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	summary := EvaluatePipelineTags(context.Background(), reader, []domain.Project{{ID: "1", FullPath: "g/a"}}, "k8s-runner", protection, 1)
+	summary := EvaluatePipelineTags(context.Background(), reader, []domain.Project{{ID: "1", FullPath: "g/a"}}, []string{"k8s-runner"}, protection, 1)
 
 	if len(summary.Matched()) != 0 {
 		t.Error("expected the protected project not to match, even though the tag is missing")
@@ -91,7 +91,7 @@ func TestEvaluatePipelineTags_ReportsIncludesWarning(t *testing.T) {
 	reader := &fakePipelineConfigReader{
 		files: map[string][]byte{"1": []byte("include:\n  - local: other.yml\nbuild-job:\n  script: [\"x\"]\n")},
 	}
-	summary := EvaluatePipelineTags(context.Background(), reader, []domain.Project{{ID: "1", FullPath: "g/a"}}, "k8s-runner", nil, 1)
+	summary := EvaluatePipelineTags(context.Background(), reader, []domain.Project{{ID: "1", FullPath: "g/a"}}, []string{"k8s-runner"}, nil, 1)
 
 	if !summary.Results[0].HasIncludes {
 		t.Error("expected HasIncludes to be true")

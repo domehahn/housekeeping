@@ -75,7 +75,7 @@ func BuildPipelineTagPlan(
 	providerName, instance string,
 	scope domain.Scope,
 	matched []PipelineTagEvaluation,
-	tag string,
+	tags []string,
 	clock domain.Clock,
 ) domain.Plan {
 	actions := make([]domain.PlannedAction, 0, len(matched))
@@ -85,7 +85,7 @@ func BuildPipelineTagPlan(
 			ResourceType: domain.ResourceTypePipelineConfig,
 			ResourceID:   m.Project.ID,
 			ResourceName: m.Project.FullPath,
-			TagValue:     tag,
+			TagValues:    append([]string{}, tags...),
 			Action:       domain.ActionAddPipelineTag,
 			Reason:       m.Reasons,
 			EvaluatedAt:  now,
@@ -119,7 +119,7 @@ func BuildRunnerTagPlan(
 			ResourceType:           domain.ResourceTypeRunner,
 			ResourceID:             m.Runner.ID,
 			ResourceName:           m.Runner.Description,
-			TagValue:               tag,
+			TagValues:              []string{tag},
 			Action:                 domain.ActionAddRunnerTag,
 			Reason:                 m.Reasons,
 			EvaluatedAt:            now,

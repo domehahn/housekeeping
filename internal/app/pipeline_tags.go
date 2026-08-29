@@ -56,7 +56,7 @@ func (e PipelineTagEvaluation) Matched() bool {
 // project discovered in a scope against a desired CI tag.
 type PipelineTagEvaluationSummary struct {
 	Scope   domain.Scope
-	Tag     string
+	Tags    []string
 	Results []PipelineTagEvaluation
 }
 
@@ -82,7 +82,7 @@ func (s PipelineTagEvaluationSummary) Protected() []PipelineTagEvaluation {
 	return out
 }
 
-// EvaluatePipelineTags checks every project's .gitlab-ci.yml for tag,
+// EvaluatePipelineTags checks every project's .gitlab-ci.yml for tags,
 // using bounded concurrency (workers) since a group can contain many
 // projects and each check is a separate network round trip. Protection
 // rules (the same domain.ProjectProtectionRule used for project
@@ -92,7 +92,7 @@ func EvaluatePipelineTags(
 	ctx context.Context,
 	reader provider.PipelineConfigProposer,
 	projects []domain.Project,
-	tag string,
+	tags []string,
 	protection domain.ProjectProtectionRule,
 	workers int,
 ) PipelineTagEvaluationSummary {
@@ -114,19 +114,19 @@ func EvaluatePipelineTags(
 				return
 			}
 			defer func() { <-sem }()
-			results[idx] = evaluatePipelineTagForProject(ctx, reader, p, tag, protection)
+			results[idx] = evaluatePipelineTagsForProject(ctx, reader, p, tags, protection)
 		}(i, proj)
 	}
 	wg.Wait()
 
-	return PipelineTagEvaluationSummary{Tag: tag, Results: results}
+	return PipelineTagEvaluationSummary{Tags: append([]string{}, tags...), Results: results}
 }
 
-func evaluatePipelineTagForProject(
+func evaluatePipelineTagsForProject(
 	ctx context.Context,
 	reader provider.PipelineConfigProposer,
 	proj domain.Project,
-	tag string,
+	tags []string,
 	protection domain.ProjectProtectionRule,
 ) PipelineTagEvaluation {
 	eval := PipelineTagEvaluation{Project: proj}
@@ -152,7 +152,7 @@ func evaluatePipelineTagForProject(
 
 	eval.HasIncludes = ciyaml.HasIncludes(content)
 
-	_, changes, err := ciyaml.AddTag(content, tag)
+	_, changes, err := ciyaml.AddTags(content, tags)
 	if err != nil {
 		eval.Status = PipelineTagParseError
 		eval.Reasons = []string{fmt.Sprintf(".gitlab-ci.yml could not be parsed: %v", err)}
@@ -161,12 +161,12 @@ func evaluatePipelineTagForProject(
 
 	if len(changes) == 0 {
 		eval.Status = PipelineTagPresent
-		eval.Reasons = []string{fmt.Sprintf("tag %q already present in default.tags and every job that defines its own tags", tag)}
+		eval.Reasons = []string{fmt.Sprintf("tags %q already present in default.tags and every job that defines its own tags", tags)}
 		return eval
 	}
 
 	eval.Status = PipelineTagMissing
-	eval.Reasons = describeChanges(changes, tag)
+	eval.Reasons = describeChanges(changes)
 	if eval.HasIncludes {
 		eval.Reasons = append(eval.Reasons, "warning: this file has an include: - jobs defined only in included files are not covered")
 	}
@@ -211,14 +211,14 @@ func DiscoverPipelineConfigs(ctx context.Context, reader provider.PipelineConfig
 	return results
 }
 
-func describeChanges(changes []ciyaml.Change, tag string) []string {
+func describeChanges(changes []ciyaml.Change) []string {
 	reasons := make([]string, 0, len(changes))
 	for _, c := range changes {
 		switch c.Kind {
 		case ciyaml.ChangeDefaultCreated:
-			reasons = append(reasons, fmt.Sprintf("tag %q missing from default.tags", tag))
+			reasons = append(reasons, fmt.Sprintf("tag %q missing from default.tags", c.Tag))
 		case ciyaml.ChangeJobAppended:
-			reasons = append(reasons, fmt.Sprintf("tag %q missing from job %q's own tags", tag, c.Job))
+			reasons = append(reasons, fmt.Sprintf("tag %q missing from job %q's own tags", c.Tag, c.Job))
 		}
 	}
 	return reasons

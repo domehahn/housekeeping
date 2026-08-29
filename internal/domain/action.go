@@ -47,8 +47,11 @@ type PlannedAction struct {
 	AccessLevel AccessLevel `json:"accessLevel,omitempty"`
 
 	// TagValue is the CI tag being added, for ActionAddPipelineTag and
-	// ActionAddRunnerTag actions only.
+	// ActionAddRunnerTag actions only. It is retained for version-2 plan
+	// compatibility; new plans use TagValues.
 	TagValue string `json:"tagValue,omitempty"`
+	// TagValues contains all tags added atomically by a version-3 tag action.
+	TagValues []string `json:"tagValues,omitempty"`
 	// OutOfScopeProjectCount is set only for ActionAddRunnerTag: the
 	// number of projects using that runner outside the evaluated scope
 	// (0 for a non-shared runner, or one only used within scope). This
@@ -65,6 +68,18 @@ type PlannedAction struct {
 	// EvaluatedAt records when the fact underlying this action was
 	// observed, so execution can decide whether to revalidate.
 	EvaluatedAt time.Time `json:"evaluatedAt"`
+}
+
+// Tags returns a copy of the action's desired tags, normalizing the legacy
+// single-value field used by version-2 plans.
+func (a PlannedAction) Tags() []string {
+	if len(a.TagValues) > 0 {
+		return append([]string{}, a.TagValues...)
+	}
+	if a.TagValue != "" {
+		return []string{a.TagValue}
+	}
+	return nil
 }
 
 // ExecutionResult is the outcome of attempting a single PlannedAction.

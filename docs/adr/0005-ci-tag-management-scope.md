@@ -25,8 +25,9 @@ operator never intended to touch.
 
 **Pipeline tags (`pipelines` command, `internal/ciyaml`):**
 
-- Only the document-wide `default: tags:` block is guaranteed to be
-  covered - created if missing, appended to if present.
+- One or more tags can be requested in one operation. The document-wide
+  `default: tags:` block is guaranteed to be covered - created if missing,
+  appended to if present - and existing values are never overwritten.
 - A job that already defines its **own** `tags:` list is also patched (in
   addition to `default:`), so a job overriding the default still receives
   the new tag. A job with **no** `tags:` of its own is deliberately left
@@ -38,10 +39,12 @@ operator never intended to touch.
   `tags:` - into whatever job extends it at pipeline-compile time. This
   means patching a template correctly reaches every job that extends it,
   without this tool needing to understand `extends:` itself.
-- Content reachable only through `include:` (another file, another
-  project) is never inspected or modified. `ciyaml.HasIncludes` flags this
-  as a warning reason on any matched project, so an operator knows the
-  file may have jobs this pass could not see.
+- Content reachable only through `include:` (another file, project, template,
+  or remote URL) is never modified. `ciyaml.HasIncludes` flags it during
+  root-file evaluation. The separate read-only `pipelines analyze` command
+  asks GitLab's CI lint API for `merged_yaml` and include metadata, allowing
+  the operator to inspect effective tag coverage without treating an included
+  source as a writable target.
 - GitLab's two-document component form is supported: a leading `spec:`
   header and the configuration after `---` are decoded separately, and only
   the configuration document is patched. Any other multi-document shape is
@@ -63,6 +66,15 @@ operator never intended to touch.
   than by a bolted-on staleness check.
 - Project identity/path and current protection rules are also re-evaluated
   immediately before the proposal, so protection changes after planning win.
+- Repeatable include/exclude expressions select project full paths, with
+  exclusions taking precedence. Multi-tag actions use plan schema version 3;
+  existing version-2 single-tag plans remain executable.
+- Optional deterministic batching sorts by project path/ID and writes ordinary
+  independently hashed plan files. Every batch must obey `max-actions`, and
+  the complete filtered selection must obey `max-percentage`.
+- `pipelines proposals status` reports the most recently updated Merge Request
+  whose deterministic branch prefix matches the exact normalized tag set. It
+  is status reporting only; scm-cleaner never merges the proposal.
 
 **Runner tags (`runners` command):**
 
@@ -100,11 +112,11 @@ operator never intended to touch.
   they touch different GitLab resources with different risk profiles and
   different confirmation requirements - collapsing them into one command
   would have hidden that distinction from the operator.
-- The known limitation that `include:`-only jobs are not patched is
-  permanent, not a "not implemented yet" gap: following `include:` would
+- The limitation that `include:`-only jobs are not patched is intentional:
+  following an include for mutation would
   mean fetching and parsing files from other projects/refs this tool may
-  not have access to at all, and silently guessing at their content is
-  worse than clearly reporting the limitation.
+  not own or have permission to update. Effective read-only analysis supplies
+  visibility without silently expanding the write scope.
 - `SafetyLimits` (`internal/app/safety.go`) was generalized from four
   named fields to a `map[domain.ResourceType]ResourceLimit` specifically
   to accommodate `pipeline_config`/`runner` alongside `project`/`user`

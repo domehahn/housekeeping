@@ -86,13 +86,13 @@ func TestProposePipelineTagChange_HappyPath(t *testing.T) {
 			_, _ = w.Write([]byte(`{"message":"404 Branch Not Found"}`))
 		case strings.Contains(r.URL.Path, "/repository/branches") && r.Method == http.MethodPost:
 			gotBranchReq = true
-			writeJSON(t, w, map[string]any{"name": proposalBranchName("k8s-runner", patched)})
+			writeJSON(t, w, map[string]any{"name": proposalBranchName([]string{"k8s-runner"}, patched)})
 		case strings.Contains(r.URL.Path, "/repository/files/") && r.Method == http.MethodGet:
 			w.Header().Set("Content-Type", "text/plain")
 			_, _ = w.Write([]byte("build-job:\n  script: [x]\n"))
 		case strings.Contains(r.URL.Path, "/repository/files/") && r.Method == http.MethodPut:
 			gotFileReq = true
-			writeJSON(t, w, map[string]any{"file_path": ".gitlab-ci.yml", "branch": proposalBranchName("k8s-runner", patched)})
+			writeJSON(t, w, map[string]any{"file_path": ".gitlab-ci.yml", "branch": proposalBranchName([]string{"k8s-runner"}, patched)})
 		case strings.HasSuffix(r.URL.Path, "/merge_requests") && r.Method == http.MethodGet:
 			writeJSON(t, w, []map[string]any{})
 		case strings.HasSuffix(r.URL.Path, "/merge_requests") && r.Method == http.MethodPost:
@@ -103,7 +103,7 @@ func TestProposePipelineTagChange_HappyPath(t *testing.T) {
 		}
 	})
 
-	url, err := a.ProposePipelineTagChange(context.Background(), "1", patched, "k8s-runner")
+	url, err := a.ProposePipelineTagChange(context.Background(), "1", patched, []string{"k8s-runner"})
 	if err != nil {
 		t.Fatalf("ProposePipelineTagChange: %v", err)
 	}
@@ -123,7 +123,7 @@ func TestProposePipelineTagChange_RetryReusesExistingBranchAndMergeRequest(t *te
 		case strings.HasSuffix(r.URL.Path, "/projects/1"):
 			writeJSON(t, w, map[string]any{"id": 1, "default_branch": "main"})
 		case strings.Contains(r.URL.Path, "/repository/branches/"):
-			writeJSON(t, w, map[string]any{"name": proposalBranchName("k8s-runner", patched)})
+			writeJSON(t, w, map[string]any{"name": proposalBranchName([]string{"k8s-runner"}, patched)})
 		case strings.Contains(r.URL.Path, "/repository/files/") && r.Method == http.MethodGet:
 			w.Header().Set("Content-Type", "text/plain")
 			_, _ = w.Write(patched)
@@ -135,7 +135,7 @@ func TestProposePipelineTagChange_RetryReusesExistingBranchAndMergeRequest(t *te
 		}
 	})
 
-	url, err := a.ProposePipelineTagChange(context.Background(), "1", patched, "k8s-runner")
+	url, err := a.ProposePipelineTagChange(context.Background(), "1", patched, []string{"k8s-runner"})
 	if err != nil {
 		t.Fatalf("expected retry to succeed, got %v", err)
 	}
@@ -144,6 +144,40 @@ func TestProposePipelineTagChange_RetryReusesExistingBranchAndMergeRequest(t *te
 	}
 	if putOrPostCalled {
 		t.Fatal("retry must not update content or create a duplicate merge request")
+	}
+}
+
+func TestGetMergedPipelineConfig(t *testing.T) {
+	a := newTestAdapter(t, func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasSuffix(r.URL.Path, "/projects/1/ci/lint") {
+			t.Fatalf("unexpected request: %s", r.URL.Path)
+		}
+		writeJSON(t, w, map[string]any{
+			"valid":       true,
+			"merged_yaml": "default:\n  tags: [AKS]\n",
+			"includes":    []map[string]any{{"type": "local", "location": "jobs.yml", "context_project": "company/a", "context_sha": "abc"}},
+		})
+	})
+	content, includes, err := a.GetMergedPipelineConfig(context.Background(), "1")
+	if err != nil || !strings.Contains(string(content), "AKS") || len(includes) != 1 || includes[0].Location != "jobs.yml" {
+		t.Fatalf("GetMergedPipelineConfig() = %q, %+v, %v", content, includes, err)
+	}
+}
+
+func TestListPipelineTagProposalsFiltersBranchPrefix(t *testing.T) {
+	a := newTestAdapter(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("order_by") != "updated_at" || r.URL.Query().Get("sort") != "desc" {
+			t.Errorf("proposal ordering query = %q", r.URL.RawQuery)
+		}
+		writeJSON(t, w, []map[string]any{
+			{"title": "collision", "description": proposalTagMarker([]string{"aks"}), "state": "opened", "source_branch": "scm-cleaner/add-tag-aks-newest", "web_url": "https://example/mr/collision"},
+			{"title": "scm-cleaner", "description": proposalTagMarker([]string{"AKS"}), "state": "merged", "source_branch": "scm-cleaner/add-tag-aks-abcdef", "web_url": "https://example/mr/1"},
+			{"title": "other", "state": "opened", "source_branch": "feature/other", "web_url": "https://example/mr/2"},
+		})
+	})
+	proposals, err := a.ListPipelineTagProposals(context.Background(), "1", []string{"AKS"})
+	if err != nil || len(proposals) != 1 || proposals[0].State != "merged" {
+		t.Fatalf("ListPipelineTagProposals() = %+v, %v", proposals, err)
 	}
 }
 

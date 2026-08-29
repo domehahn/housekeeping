@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"slices"
 	"testing"
 	"time"
 
@@ -26,8 +27,8 @@ type fakeExecutor struct {
 	currentUserID     string
 	currentUserErr    error
 
-	ciFiles           map[string][]byte // projectID -> content; absent key means no CI file
-	proposedMRs       map[string]string // projectID -> tag, recording every ProposePipelineTagChange call
+	ciFiles           map[string][]byte   // projectID -> content; absent key means no CI file
+	proposedMRs       map[string][]string // projectID -> tags, recording every ProposePipelineTagChange call
 	proposeMRURL      string
 	proposeMRErr      error
 	runnerTags        map[string][]string // runnerID -> current tags
@@ -45,7 +46,7 @@ func newFakeExecutor() *fakeExecutor {
 		blockedUsers:      map[string]bool{},
 		currentUserID:     "current",
 		ciFiles:           map[string][]byte{},
-		proposedMRs:       map[string]string{},
+		proposedMRs:       map[string][]string{},
 		runnerTags:        map[string][]string{},
 		updatedRunnerTags: map[string][]string{},
 		runners:           map[string]domain.Runner{},
@@ -57,11 +58,11 @@ func (f *fakeExecutor) GetPipelineConfig(_ context.Context, projectID string) ([
 	return content, ok, nil
 }
 
-func (f *fakeExecutor) ProposePipelineTagChange(_ context.Context, projectID string, _ []byte, tag string) (string, error) {
+func (f *fakeExecutor) ProposePipelineTagChange(_ context.Context, projectID string, _ []byte, tags []string) (string, error) {
 	if f.proposeMRErr != nil {
 		return "", f.proposeMRErr
 	}
-	f.proposedMRs[projectID] = tag
+	f.proposedMRs[projectID] = append([]string{}, tags...)
 	if f.proposeMRURL != "" {
 		return f.proposeMRURL, nil
 	}
@@ -324,12 +325,12 @@ func TestExecute_AddPipelineTag_OpensMergeRequest(t *testing.T) {
 	f.proposeMRURL = "https://gitlab.example.com/group/proj/-/merge_requests/42"
 
 	p := domain.Plan{Actions: []domain.PlannedAction{
-		{ResourceType: domain.ResourceTypePipelineConfig, ResourceID: "1", Action: domain.ActionAddPipelineTag, TagValue: "k8s-runner", EvaluatedAt: time.Now()},
+		{ResourceType: domain.ResourceTypePipelineConfig, ResourceID: "1", Action: domain.ActionAddPipelineTag, TagValues: []string{"AKS", "production"}, EvaluatedAt: time.Now()},
 	}}
 	summary := Execute(context.Background(), f, p, ExecuteOptions{Apply: true, Revalidate: true})
 
-	if f.proposedMRs["1"] != "k8s-runner" {
-		t.Errorf("expected a Merge Request to be proposed for project 1 with tag k8s-runner, got %+v", f.proposedMRs)
+	if !slices.Equal(f.proposedMRs["1"], []string{"AKS", "production"}) {
+		t.Errorf("expected one Merge Request with both tags, got %+v", f.proposedMRs)
 	}
 	if summary.Outcomes[0].Result != domain.ResultSuccess {
 		t.Fatalf("expected ResultSuccess, got %v: %s", summary.Outcomes[0].Result, summary.Outcomes[0].Detail)

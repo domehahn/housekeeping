@@ -129,6 +129,37 @@ This mode is convenient for interactive workstations. `service` is required;
 `account` is optional and defaults to the username reported by the operating
 system. Set it explicitly for bot credentials and portable configuration.
 
+The built-in auth commands are the preferred setup path. The token is read
+from a hidden terminal prompt, never from a flag or command-line argument:
+
+```bash
+scm-cleaner auth login \
+  --source keychain \
+  --service scm-cleaner \
+  --account gitlab-bot
+
+scm-cleaner auth status \
+  --service scm-cleaner \
+  --account gitlab-bot
+
+scm-cleaner auth logout \
+  --service scm-cleaner \
+  --account gitlab-bot
+```
+
+| Command/parameter | Required/default | Function |
+|---|---|---|
+| `auth login` | Command | Prompt without echo and create/update the native keychain entry |
+| `auth status` | Command | Check existence without displaying the credential |
+| `auth logout` | Command | Remove the native keychain entry; already absent is a successful no-op |
+| `--source keychain` | Optional; `keychain` | Explicit credential backend; no other login destination is accepted |
+| `--service NAME` | Configured `token.service`, otherwise required | Native credential-store service |
+| `--account NAME` | Configured `token.account`, otherwise current OS user | Native credential-store account |
+
+`auth login` deliberately requires an interactive terminal. It does not accept
+the token on stdin or as `--token`, preventing shell history and accidental
+pipeline-log exposure.
+
 ```yaml
 provider:
   type: gitlab
@@ -140,7 +171,8 @@ provider:
       account: gitlab-bot
 ```
 
-macOS Keychain (the first command prompts for the token):
+The OS-native commands remain useful for troubleshooting. macOS Keychain (the
+first command prompts for the token):
 
 ```bash
 security add-generic-password -U -s "scm-cleaner" -a "gitlab-bot" -w
@@ -467,49 +499,93 @@ scm-cleaner users evaluate \
 ### 8.6 Pipeline CI-tag proposals
 
 `pipelines list` reports which projects have `.gitlab-ci.yml`.
-`pipelines evaluate` identifies missing tags, parse/fetch errors, protected
-projects, and `include:` warnings. `pipelines plan` creates actions that open
-one reviewable Merge Request per eligible project; it never merges them.
+`pipelines evaluate` inspects the repository's root file, `pipelines analyze`
+asks GitLab for the effective include-expanded configuration, and `pipelines
+plan` creates actions that open one reviewable Merge Request per eligible
+project. `pipelines proposals status` reports the latest matching proposal.
+No command merges a proposal.
 
 | Command/parameter | Required/default | Function |
 |---|---|---|
 | `pipelines list` | No local parameters | Show whether each scoped project has `.gitlab-ci.yml` |
-| `pipelines evaluate --tag TAG` | `--tag` required | Analyze current CI YAML and report tag status/reasons |
-| `pipelines plan --tag TAG` | `--tag` required | Build Merge Request proposal actions for eligible projects |
+| `pipelines evaluate` | One or more `--tag` | Analyze the root `.gitlab-ci.yml` and report tag status/reasons |
+| `pipelines analyze` | One or more `--tag` | Read GitLab's effective, include-expanded CI configuration without modifying it |
+| `pipelines plan` | One or more `--tag` | Build Merge Request proposal actions for eligible projects |
+| `pipelines proposals status` | One or more `--tag` | Show the newest matching proposal per selected project (`opened`, `merged`, `closed`, `locked`, or `none`) |
+| `--tag TAG` | Required, repeatable | Check/add an exact runner tag; duplicates are removed and order is normalized |
+| `--include-project REGEX` | Optional, repeatable | Keep projects whose full path matches at least one expression |
+| `--exclude-project REGEX` | Optional, repeatable | Remove matching full paths; exclusions take precedence over inclusions |
 | `--output-plan FILE` | Plan only; optional | Save canonical hashed JSON for `execute` |
+| `--batch-size N` | Plan only; `0` disabled | Split actions deterministically into plans containing at most N actions; requires `--output-plan` |
 | `--max-actions N` | Plan only; config limit | Override `safety.max_actions.pipeline_tags` for this run |
 | `--max-percentage N` | Plan only; config limit/`0` disabled | Override `safety.max_percentage.pipeline_tags` for this run |
 
 All pipeline commands also use global scope, recursion, workers, provider, and
 output parameters. Project protection is loaded from configuration and applies
-to pipeline proposals too.
+to pipeline proposals too. Filters are evaluated against the complete GitLab
+project path, for example `company/platform/api`.
 
 ```bash
 # Discover CI configuration files:
 scm-cleaner pipelines list \
   --group company/platform --recursive
 
-# Check default.tags and existing job-level tags lists:
+# Check two tags in the root files, but only for services outside the legacy tree:
 scm-cleaner pipelines evaluate \
+  --group company/platform --recursive \
+  --tag k8s-runner --tag linux-amd64 \
+  --include-project '^company/platform/services/' \
+  --exclude-project '/legacy/'
+
+# Ask GitLab to resolve includes and inspect the effective configurations:
+scm-cleaner pipelines analyze \
   --group company/platform --recursive \
   --tag k8s-runner
 
-# Create the reviewable proposal plan:
+# Create one reviewable plan containing both tags per project:
 scm-cleaner pipelines plan \
   --group company/platform --recursive \
-  --tag k8s-runner \
+  --tag k8s-runner --tag linux-amd64 \
   --max-actions 10 \
   --output-plan pipeline-tags.json
 
 # Simulate, then open the Merge Requests after confirmation:
 scm-cleaner execute pipeline-tags.json
 scm-cleaner execute pipeline-tags.json --apply
+
+# Inspect the newest MR matching this exact normalized tag set:
+scm-cleaner pipelines proposals status \
+  --group company/platform --recursive \
+  --tag linux-amd64 --tag k8s-runner
 ```
 
-The patch adds the tag to `default.tags` and to jobs/templates that already
-define their own `tags:` list. Jobs inheriting `default.tags` remain unchanged,
-external includes are reported but not followed, and GitLab `spec:` header
-documents are preserved.
+If 42 changes exceed the configured `max-actions: 10`, create deterministic
+rollout batches instead of weakening that absolute limit:
+
+```bash
+scm-cleaner pipelines plan \
+  --group company/platform --recursive \
+  --tag AKS \
+  --batch-size 10 \
+  --output-plan pipeline-tags.json
+
+# Produces pipeline-tags-001.json through pipeline-tags-005.json.
+scm-cleaner execute pipeline-tags-001.json
+scm-cleaner execute pipeline-tags-001.json --apply
+```
+
+Each batch is independently hashed and checked against the normal absolute
+limit. The entire selected rollout is still checked against
+`max-percentage`; batching cannot disguise an overly broad selection. The
+percentage denominator is the project set remaining after the explicit
+include/exclude filters.
+
+The patch adds all requested tags to `default.tags` and to jobs/templates that
+already define their own `tags:` list. Existing tags are retained; nothing is
+overwritten. Jobs inheriting `default.tags` remain unchanged. Root-file
+evaluation reports includes as a warning; `pipelines analyze` resolves them
+through GitLab for read-only effective analysis, but plan/apply never edits an
+included source. GitLab `spec:` header documents are preserved.
 
 ### 8.7 Runner-tag management
 
@@ -641,7 +717,7 @@ resources and, with `--output-plan FILE`, write a plan document:
 
 ```json
 {
-  "version": 2,
+  "version": 3,
   "provider": "gitlab",
   "instance": "https://gitlab.example.com",
   "scope": { "type": "group", "id": "123", "path": "company/sandbox", "recursive": true },
@@ -666,6 +742,8 @@ resources and, with `--output-plan FILE`, write a plan document:
   [ADR 0002](docs/adr/0002-plan-before-execute.md) and the threat model).
 - `version`/`provider`/`instance` are checked by `execute` before anything
   runs.
+- Version 3 stores atomic multi-tag actions in `tagValues`. Existing hashed
+  version-2 plans containing the legacy single `tagValue` remain executable.
 
 ## 11. Execution
 
@@ -1037,10 +1115,11 @@ Highlights:
 - **Plan-time percentage guard is not re-evaluated at execute time**
   against a fresh discovered total (a plan file does not carry that
   count); the absolute max-actions guard *is* re-checked at execute time.
-- **Pipeline tag patching only covers `default: tags:` and jobs that
+- **Pipeline tag mutation only covers `default: tags:` and jobs that
   already define their own `tags:` list.** A job with no `tags:` of its
-  own is left alone by design, and jobs defined only via `include:` from
-  another file/project are never inspected - see
+  own is left alone by design. Jobs defined only via `include:` from
+  another file/project can be inspected read-only with `pipelines analyze`,
+  but their source files are never mutated - see
   [ADR 0005](docs/adr/0005-ci-tag-management-scope.md).
 - **GitLab CI header documents are preserved.** Files using a leading
   `spec:` header separated from the CI configuration by `---` are decoded
@@ -1054,10 +1133,11 @@ Highlights:
 
 ## 24. Pipeline tag cleanup
 
-Adds a CI tag to the `default: tags:` block of every project's
-`.gitlab-ci.yml` in scope (creating the block if missing), and to any job
-that already defines its own `tags:` list. A job with no `tags:` of its
-own is left alone - it already inherits from `default:`. Changes are
+Adds one or more CI tags to the `default: tags:` block of every selected
+project's `.gitlab-ci.yml` (creating the block if missing), and to any job
+that already defines its own `tags:` list. Existing tags are retained. A job
+with no `tags:` of its own is left alone because it inherits from `default:`.
+Changes are
 **never** committed directly: `execute --apply` opens one Merge Request
 per affected project; nothing merges it automatically.
 
@@ -1066,20 +1146,40 @@ a partial failure reuses the matching branch and open Merge Request instead
 of becoming permanently stuck on a branch-name conflict.
 
 ```bash
-scm-cleaner pipelines evaluate --group company --recursive --tag k8s-runner
+scm-cleaner pipelines evaluate \
+  --group company/platform --recursive \
+  --tag k8s-runner --tag linux-amd64 \
+  --include-project '^company/platform/' \
+  --exclude-project '/archived-mirror$'
+
+scm-cleaner pipelines analyze \
+  --group company/platform --recursive --tag k8s-runner
 
 scm-cleaner pipelines plan \
-  --group company --recursive --tag k8s-runner \
-  --output-plan pipeline-tags.json
+  --group company/platform --recursive \
+  --tag k8s-runner --tag linux-amd64 \
+  --batch-size 10 --output-plan pipeline-tags.json
 
-scm-cleaner execute pipeline-tags.json               # dry run
-scm-cleaner execute pipeline-tags.json --apply \
-  --non-interactive --confirm-scope company          # opens the Merge Requests
+scm-cleaner execute pipeline-tags-001.json            # dry run
+scm-cleaner execute pipeline-tags-001.json --apply \
+  --non-interactive --confirm-scope company/platform # opens the Merge Requests
+
+scm-cleaner pipelines proposals status \
+  --group company/platform --recursive \
+  --tag k8s-runner --tag linux-amd64
 ```
 
-Jobs defined only via `include:` (another file or project) are not
-covered - `pipelines evaluate`/`plan` flags this per project as a warning
-reason rather than silently missing them. See
+Without `--batch-size`, the output keeps the exact `--output-plan` filename.
+With batching, `pipeline-tags.json` becomes `pipeline-tags-001.json`,
+`pipeline-tags-002.json`, and so on in stable project-path/ID order. Every
+file is a normal plan and is executed separately. A batch must obey
+`max-actions`; the whole rollout must obey `max-percentage`.
+
+Jobs defined only via `include:` (another file, project, template, or remote
+URL) are not mutation targets. `pipelines evaluate`/`plan` flags their
+presence. `pipelines analyze` uses GitLab's CI lint API to resolve the current
+effective configuration and reveal missing tags in included jobs, but stays
+read-only. See
 [ADR 0005](docs/adr/0005-ci-tag-management-scope.md).
 
 ## 25. Runner tag cleanup

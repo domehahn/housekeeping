@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 	"time"
 
@@ -65,6 +66,25 @@ func TestSaveAndLoadPlan_PipelineConfigAction(t *testing.T) {
 	}
 }
 
+func TestSaveAndLoadPlan_MultiplePipelineTags(t *testing.T) {
+	p := samplePlan()
+	p.Actions = []domain.PlannedAction{{
+		ResourceType: domain.ResourceTypePipelineConfig, ResourceID: "1", ResourceName: "company/a",
+		Action: domain.ActionAddPipelineTag, TagValues: []string{"AKS", "production"}, EvaluatedAt: p.CreatedAt,
+	}}
+	path := filepath.Join(t.TempDir(), "plan.json")
+	if err := SavePlan(path, p); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := LoadPlan(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(loaded.Actions[0].Tags(), []string{"AKS", "production"}) {
+		t.Fatalf("loaded tags = %v", loaded.Actions[0].Tags())
+	}
+}
+
 func TestLoadPlan_RejectsPipelineTagActionWithoutTagValue(t *testing.T) {
 	p := samplePlan()
 	p.Actions = []domain.PlannedAction{{
@@ -77,6 +97,21 @@ func TestLoadPlan_RejectsPipelineTagActionWithoutTagValue(t *testing.T) {
 	}
 	if _, err := LoadPlan(path); err == nil {
 		t.Error("expected an add-pipeline-tag action with no tagValue to be rejected")
+	}
+}
+
+func TestLoadPlan_RejectsWhitespacePipelineTag(t *testing.T) {
+	p := samplePlan()
+	p.Actions = []domain.PlannedAction{{
+		ResourceType: domain.ResourceTypePipelineConfig, ResourceID: "1", ResourceName: "company/a",
+		Action: domain.ActionAddPipelineTag, TagValues: []string{"  "}, EvaluatedAt: p.CreatedAt,
+	}}
+	path := filepath.Join(t.TempDir(), "plan.json")
+	if err := SavePlan(path, p); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadPlan(path); err == nil {
+		t.Error("expected a whitespace-only pipeline tag to be rejected")
 	}
 }
 

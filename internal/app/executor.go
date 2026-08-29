@@ -305,7 +305,8 @@ func performPipelineTagAction(ctx context.Context, client Executor, action domai
 		return "", provider.NewError(provider.KindNotFound, "add pipeline tag", ".gitlab-ci.yml no longer exists", nil)
 	}
 
-	patched, changes, err := ciyaml.AddTag(content, action.TagValue)
+	tags := action.Tags()
+	patched, changes, err := ciyaml.AddTags(content, tags)
 	if err != nil {
 		return "", fmt.Errorf("patch .gitlab-ci.yml: %w", err)
 	}
@@ -316,7 +317,7 @@ func performPipelineTagAction(ctx context.Context, client Executor, action domai
 		return "", provider.NewError(provider.KindNotFound, "add pipeline tag", "tag already present", nil)
 	}
 
-	url, err := client.ProposePipelineTagChange(ctx, action.ResourceID, patched, action.TagValue)
+	url, err := client.ProposePipelineTagChange(ctx, action.ResourceID, patched, tags)
 	if err != nil {
 		return "", err
 	}
@@ -356,12 +357,25 @@ func performRunnerTagAction(ctx context.Context, client Executor, planScope doma
 	if err != nil {
 		return fmt.Errorf("fetch current runner tags: %w", err)
 	}
-	for _, t := range current {
-		if t == action.TagValue {
-			return provider.NewError(provider.KindNotFound, "add runner tag", "tag already present", nil)
+	missing := missingTags(current, action.Tags())
+	if len(missing) == 0 {
+		return provider.NewError(provider.KindNotFound, "add runner tag", "tags already present", nil)
+	}
+	return client.UpdateRunnerTags(ctx, action.ResourceID, current, append(append([]string{}, current...), missing...))
+}
+
+func missingTags(current, desired []string) []string {
+	present := make(map[string]bool, len(current))
+	for _, tag := range current {
+		present[tag] = true
+	}
+	missing := make([]string, 0, len(desired))
+	for _, tag := range desired {
+		if !present[tag] {
+			missing = append(missing, tag)
 		}
 	}
-	return client.UpdateRunnerTags(ctx, action.ResourceID, current, append(append([]string{}, current...), action.TagValue))
+	return missing
 }
 
 func sameStrings(a, b []string) bool {
