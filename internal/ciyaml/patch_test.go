@@ -277,6 +277,23 @@ func TestAddTag_EmptyTagIsRejected(t *testing.T) {
 	}
 }
 
+func TestAddTags_AddsMultipleWithoutReplacingExisting(t *testing.T) {
+	content := []byte("default:\n  tags: [docker]\nbuild:\n  tags: [linux]\n")
+	patched, changes, err := AddTags(content, []string{"AKS", "production", "AKS"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(patched)
+	for _, want := range []string{"docker", "linux", "AKS", "production"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("patched YAML missing %q:\n%s", want, got)
+		}
+	}
+	if len(changes) != 4 {
+		t.Fatalf("changes = %+v, want two default and two job additions", changes)
+	}
+}
+
 func TestAddTag_SecondCallIsFullyIdempotent(t *testing.T) {
 	content := []byte(`test-job:
   tags:

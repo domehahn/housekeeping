@@ -32,6 +32,10 @@ whatever access the token has.
   of credentials from an unintended trust boundary.
 - Secret values are not cached by scm-cleaner. The provider adapter receives
   only the resolved value and has no access to keychain/environment metadata.
+- `auth login` reads from a no-echo interactive terminal and accepts neither a
+  token flag nor piped stdin. `auth status` never prints the value, backend
+  failures are sanitized, and only explicit login/logout commands mutate the
+  keychain.
 - Native-store security inherits the OS session and keychain policy. On shared
   or headless hosts, prefer a masked environment variable supplied by CI and
   scope it to the smallest possible GitLab role/group.
@@ -149,6 +153,9 @@ matches far more resources than intended.
   the discovered total) guards refuse to plan or execute past configured
   limits; overriding either requires an explicit CLI flag.
 - Dry run is the default; nothing is destroyed by planning alone.
+- Pipeline proposal batching checks the full filtered rollout against the
+  percentage guard and every independently hashed batch against the absolute
+  guard. Splitting a rollout therefore does not bypass either policy.
 - Interactive confirmation requires typing the literal action count
   (`apply N actions`), forcing the operator to actually look at the
   number before confirming.
@@ -184,7 +191,7 @@ error output.
 
 ### 11. A proposed CI configuration change breaks a pipeline
 
-**Risk**: an automated `.gitlab-ci.yml` edit (adding a CI tag) is
+**Risk**: an automated `.gitlab-ci.yml` edit (adding CI tags) is
 malformed, or interacts badly with a project's actual pipeline semantics
 (e.g. `extends:`, includes, anchors), breaking CI for that project.
 
@@ -192,7 +199,7 @@ malformed, or interacts badly with a project's actual pipeline semantics
 - The patch (`internal/ciyaml`) never commits directly - it always opens a
   Merge Request. Nothing in this tool merges it; a human reviews the real
   diff in GitLab's own MR view before it takes effect.
-- The patch logic only ever adds a tag to a `tags:` list; it never removes
+- The patch logic only ever adds tags to a `tags:` list; it never removes
   or reorders existing content, and is proven idempotent and
   comment/formatting-preserving by its own unit tests
   (`internal/ciyaml/patch_test.go`).
@@ -201,8 +208,10 @@ malformed, or interacts badly with a project's actual pipeline semantics
   on a best-effort guess.
 - GitLab's supported two-document `spec:` header form is preserved. Any
   unrecognized multi-document stream is rejected instead of truncating it.
-- Jobs reachable only through `include:` are never touched; this is
-  reported as an explicit warning rather than silently missed.
+- Jobs reachable only through `include:` are never touched. Their effective
+  configuration can be inspected read-only through GitLab's CI lint API, and
+  root-file evaluation reports includes explicitly rather than silently
+  missing them.
 - Project protection rules and project identity/path are checked again at
   execution time. Proposal branches are content-addressed and an existing
   open MR is reused, making retries after partial failure idempotent.

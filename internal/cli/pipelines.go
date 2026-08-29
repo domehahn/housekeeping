@@ -2,6 +2,9 @@ package cli
 
 import (
 	"fmt"
+	"maps"
+	"path/filepath"
+	"strings"
 
 	"github.com/spf13/cobra"
 
@@ -16,11 +19,11 @@ func newPipelinesCmd(e *env) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "pipelines",
 		Short: "Discover, evaluate, and plan CI tag additions to .gitlab-ci.yml across a scope",
-		Long: `pipelines manages adding a CI runner tag to projects' .gitlab-ci.yml.
+		Long: `pipelines manages adding one or more CI runner tags to projects' .gitlab-ci.yml.
 
-It ensures the tag is present in the document-wide default.tags block
-(creating it if missing), and appends the tag to any job that already
-defines its own tags: list (so a job overriding default: still gets it).
+It ensures every requested tag is present in the document-wide default.tags
+block (creating it if missing), and appends missing tags to any job that
+already defines its own tags: list (so a job overriding default: still gets them).
 A job with no tags: of its own is deliberately left untouched - it
 already inherits from default:.
 
@@ -28,11 +31,11 @@ Changes are never committed directly: "pipelines plan" followed by
 "execute --apply" opens one Merge Request per affected project. A human
 always reviews and merges it - nothing here merges automatically.
 
-See docs/adr/0005-ci-tag-management-scope.md for the full rationale and
-known limitations (e.g. jobs defined only via include: from another file
-or project are not covered).`,
+Use "pipelines analyze" to inspect GitLab's include-expanded effective
+configuration. Included sources are never modified. See
+docs/adr/0005-ci-tag-management-scope.md for the full rationale.`,
 	}
-	cmd.AddCommand(newPipelinesListCmd(e), newPipelinesEvaluateCmd(e), newPipelinesPlanCmd(e))
+	cmd.AddCommand(newPipelinesListCmd(e), newPipelinesEvaluateCmd(e), newPipelinesAnalyzeCmd(e), newPipelinesPlanCmd(e), newPipelinesProposalsCmd(e))
 	return cmd
 }
 
@@ -81,44 +84,53 @@ func newPipelinesListCmd(e *env) *cobra.Command {
 }
 
 func newPipelinesEvaluateCmd(e *env) *cobra.Command {
-	var tag string
+	var tags, includeProjects, excludeProjects []string
 	cmd := &cobra.Command{
 		Use:   "evaluate",
-		Short: "Check every project's .gitlab-ci.yml for a CI tag, without producing a plan",
+		Short: "Check every project's .gitlab-ci.yml for CI tags, without producing a plan",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if tag == "" {
-				return exitErr(ExitInvalidConfiguration, fmt.Errorf("--tag is required"))
+			normalizedTags, err := app.NormalizeTags(tags)
+			if err != nil {
+				return exitErr(ExitInvalidConfiguration, err)
 			}
 			client, err := e.requireClient()
 			if err != nil {
 				return err
 			}
-			summary, scope, err := runPipelineTagEvaluation(cmd, e, client, tag)
+			summary, scope, err := runPipelineTagEvaluation(cmd, e, client, normalizedTags, includeProjects, excludeProjects)
 			if err != nil {
 				return err
 			}
 			return renderPipelineTagEvaluation(cmd, e, scope, summary)
 		},
 	}
-	cmd.Flags().StringVar(&tag, "tag", "", "the CI tag to check for/add (required)")
+	addPipelineSelectionFlags(cmd, &tags, &includeProjects, &excludeProjects)
 	return cmd
 }
 
 func newPipelinesPlanCmd(e *env) *cobra.Command {
-	var tag, outputPlan string
-	var maxActions, maxPercentage int
+	var tags, includeProjects, excludeProjects []string
+	var outputPlan string
+	var maxActions, maxPercentage, batchSize int
 	cmd := &cobra.Command{
 		Use:   "plan",
 		Short: "Evaluate .gitlab-ci.yml tags and produce a reviewable, saveable plan of Merge Request proposals",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if tag == "" {
-				return exitErr(ExitInvalidConfiguration, fmt.Errorf("--tag is required"))
+			normalizedTags, err := app.NormalizeTags(tags)
+			if err != nil {
+				return exitErr(ExitInvalidConfiguration, err)
+			}
+			if batchSize < 0 {
+				return exitErr(ExitInvalidConfiguration, fmt.Errorf("--batch-size must not be negative"))
+			}
+			if batchSize > 0 && outputPlan == "" {
+				return exitErr(ExitInvalidConfiguration, fmt.Errorf("--batch-size requires --output-plan"))
 			}
 			client, err := e.requireClient()
 			if err != nil {
 				return err
 			}
-			summary, scope, err := runPipelineTagEvaluation(cmd, e, client, tag)
+			summary, scope, err := runPipelineTagEvaluation(cmd, e, client, normalizedTags, includeProjects, excludeProjects)
 			if err != nil {
 				return err
 			}
@@ -129,22 +141,41 @@ func newPipelinesPlanCmd(e *env) *cobra.Command {
 			}
 
 			matched := summary.Matched()
-			plan := app.BuildPipelineTagPlan(info.Provider, info.Instance, scope, matched, tag, e.clock)
+			plan := app.BuildPipelineTagPlan(info.Provider, info.Instance, scope, matched, normalizedTags, e.clock)
 
 			limits := resolveSafetyLimits(e, maxActions, maxPercentage, domain.ResourceTypePipelineConfig)
 			discovered := map[domain.ResourceType]int{domain.ResourceTypePipelineConfig: summary.Discovered()}
-			if violations := app.CheckGuards(plan, discovered, limits); len(violations) > 0 {
-				for _, v := range violations {
-					cmd.PrintErrln("SAFETY GUARD:", v.Error())
+			plans := []domain.Plan{plan}
+			if batchSize > 0 {
+				plans, err = app.BatchPlan(plan, batchSize)
+				if err != nil {
+					return exitErr(ExitInvalidConfiguration, err)
 				}
-				return exitErr(ExitSafetyGuardTriggered, fmt.Errorf("plan exceeds configured safety guards; adjust policy or pass an explicit override"))
+				percentageLimits := limits
+				percentageLimits.Limits = maps.Clone(limits.Limits)
+				limit := percentageLimits.Limits[domain.ResourceTypePipelineConfig]
+				limit.MaxActions = len(plan.Actions)
+				percentageLimits.Limits[domain.ResourceTypePipelineConfig] = limit
+				if err := reportPipelineGuardViolations(cmd, plan, discovered, percentageLimits); err != nil {
+					return err
+				}
+				for _, batch := range plans {
+					if err := reportPipelineGuardViolations(cmd, batch, nil, limits); err != nil {
+						return err
+					}
+				}
+			} else if err := reportPipelineGuardViolations(cmd, plan, discovered, limits); err != nil {
+				return err
 			}
 
 			if outputPlan != "" {
-				if err := app.SavePlan(outputPlan, plan); err != nil {
-					return exitErr(ExitGeneralError, err)
+				for index, currentPlan := range plans {
+					path := batchPlanPath(outputPlan, index, len(plans))
+					if err := app.SavePlan(path, currentPlan); err != nil {
+						return exitErr(ExitGeneralError, err)
+					}
+					cmd.Printf("Plan written to %s (%d action(s)).\n", path, len(currentPlan.Actions))
 				}
-				cmd.Printf("Plan written to %s (%d action(s)).\n", outputPlan, len(plan.Actions))
 			}
 
 			if err := renderPipelineTagEvaluation(cmd, e, scope, summary); err != nil {
@@ -153,14 +184,15 @@ func newPipelinesPlanCmd(e *env) *cobra.Command {
 			return output.Render(cmd.OutOrStdout(), e.format, planTable(plan), plan)
 		},
 	}
-	cmd.Flags().StringVar(&tag, "tag", "", "the CI tag to check for/add (required)")
+	addPipelineSelectionFlags(cmd, &tags, &includeProjects, &excludeProjects)
 	cmd.Flags().StringVar(&outputPlan, "output-plan", "", "write the plan as JSON to this path")
+	cmd.Flags().IntVar(&batchSize, "batch-size", 0, "split matched projects into deterministic plans of at most N actions")
 	cmd.Flags().IntVar(&maxActions, "max-actions", 0, "override safety.max_actions.pipeline_tags (must be explicit)")
 	cmd.Flags().IntVar(&maxPercentage, "max-percentage", 0, "override safety.max_percentage.pipeline_tags (must be explicit)")
 	return cmd
 }
 
-func runPipelineTagEvaluation(cmd *cobra.Command, e *env, client provider.Client, tag string) (app.PipelineTagEvaluationSummary, domain.Scope, error) {
+func runPipelineTagEvaluation(cmd *cobra.Command, e *env, client provider.Client, tags, includeProjects, excludeProjects []string) (app.PipelineTagEvaluationSummary, domain.Scope, error) {
 	group, recursive, err := resolveGroupFlag(e, cmd)
 	if err != nil {
 		return app.PipelineTagEvaluationSummary{}, domain.Scope{}, err
@@ -174,15 +206,45 @@ func runPipelineTagEvaluation(cmd *cobra.Command, e *env, client provider.Client
 	if err != nil {
 		return app.PipelineTagEvaluationSummary{}, domain.Scope{}, wrapProviderErr(err)
 	}
+	projects, err = app.FilterPipelineProjects(projects, includeProjects, excludeProjects)
+	if err != nil {
+		return app.PipelineTagEvaluationSummary{}, domain.Scope{}, exitErr(ExitInvalidConfiguration, err)
+	}
 
 	protection, err := project.NewProtection(e.cfg.Projects.Protection.Paths, e.cfg.Projects.Protection.Regex)
 	if err != nil {
 		return app.PipelineTagEvaluationSummary{}, domain.Scope{}, exitErr(ExitInvalidConfiguration, err)
 	}
 
-	summary := app.EvaluatePipelineTags(ctx, client, projects, tag, protection, e.cfg.Performance.Workers)
+	summary := app.EvaluatePipelineTags(ctx, client, projects, tags, protection, e.cfg.Performance.Workers)
 	summary.Scope = scope
 	return summary, scope, nil
+}
+
+func addPipelineSelectionFlags(cmd *cobra.Command, tags, includes, excludes *[]string) {
+	cmd.Flags().StringArrayVar(tags, "tag", nil, "CI tag to check for/add; repeat for multiple tags (required)")
+	cmd.Flags().StringArrayVar(includes, "include-project", nil, "include project full paths matching this regex; repeatable")
+	cmd.Flags().StringArrayVar(excludes, "exclude-project", nil, "exclude project full paths matching this regex; repeatable; takes precedence")
+}
+
+func reportPipelineGuardViolations(cmd *cobra.Command, plan domain.Plan, discovered map[domain.ResourceType]int, limits app.SafetyLimits) error {
+	violations := app.CheckGuards(plan, discovered, limits)
+	if len(violations) == 0 {
+		return nil
+	}
+	for _, violation := range violations {
+		cmd.PrintErrln("SAFETY GUARD:", violation.Error())
+	}
+	return exitErr(ExitSafetyGuardTriggered, fmt.Errorf("plan exceeds configured safety guards; adjust policy, batching, filters, or pass an explicit override"))
+}
+
+func batchPlanPath(path string, index, total int) string {
+	if total <= 1 {
+		return path
+	}
+	ext := filepath.Ext(path)
+	base := strings.TrimSuffix(path, ext)
+	return fmt.Sprintf("%s-%03d%s", base, index+1, ext)
 }
 
 func renderPipelineTagEvaluation(cmd *cobra.Command, e *env, scope domain.Scope, summary app.PipelineTagEvaluationSummary) error {

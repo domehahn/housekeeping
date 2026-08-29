@@ -46,7 +46,10 @@ type fakeClient struct {
 	ciFiles      map[string][]byte
 	proposeURL   string
 	proposeErr   error
-	proposedTags map[string]string
+	proposedTags map[string][]string
+	mergedCI     map[string][]byte
+	ciIncludes   map[string][]domain.PipelineInclude
+	proposals    map[string][]domain.PipelineProposal
 
 	runners    []domain.Runner
 	runnersErr error
@@ -62,7 +65,10 @@ func newFakeClient() *fakeClient {
 		billable:        map[string]bool{},
 		memberships:     map[string][]domain.Membership{},
 		ciFiles:         map[string][]byte{},
-		proposedTags:    map[string]string{},
+		proposedTags:    map[string][]string{},
+		mergedCI:        map[string][]byte{},
+		ciIncludes:      map[string][]domain.PipelineInclude{},
+		proposals:       map[string][]domain.PipelineProposal{},
 		runnerTags:      map[string][]string{},
 		deletedProjects: map[string]bool{},
 		removedMembers:  map[string]bool{},
@@ -127,12 +133,18 @@ func (f *fakeClient) GetPipelineConfig(_ context.Context, projectID string) ([]b
 	content, ok := f.ciFiles[projectID]
 	return content, ok, nil
 }
-func (f *fakeClient) ProposePipelineTagChange(_ context.Context, projectID string, _ []byte, tag string) (string, error) {
+func (f *fakeClient) ProposePipelineTagChange(_ context.Context, projectID string, _ []byte, tags []string) (string, error) {
 	if f.proposeErr != nil {
 		return "", f.proposeErr
 	}
-	f.proposedTags[projectID] = tag
+	f.proposedTags[projectID] = append([]string{}, tags...)
 	return f.proposeURL, nil
+}
+func (f *fakeClient) GetMergedPipelineConfig(_ context.Context, projectID string) ([]byte, []domain.PipelineInclude, error) {
+	return f.mergedCI[projectID], f.ciIncludes[projectID], nil
+}
+func (f *fakeClient) ListPipelineTagProposals(_ context.Context, projectID string, _ []string) ([]domain.PipelineProposal, error) {
+	return f.proposals[projectID], nil
 }
 func (f *fakeClient) ListRunnersForProjects(context.Context, domain.Scope, []string) ([]domain.Runner, error) {
 	return f.runners, f.runnersErr

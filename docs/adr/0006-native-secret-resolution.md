@@ -28,6 +28,13 @@ is MIT licensed, supports macOS Keychain, Linux/BSD Secret Service, and Windows
 Credential Manager, has a small API, works with the project's Go version, and
 keeps keychain concepts out of provider adapters.
 
+Expose explicit `auth login`, `auth status`, and `auth logout` commands for
+native-keychain entries. Login obtains the value only through an interactive,
+no-echo terminal prompt; no token flag or piped-stdin input is accepted. Status
+reports only whether a non-empty credential exists. Logout is idempotent when
+the entry is already absent. Backend failures are sanitized before reaching
+CLI output. Normal resolver and provider construction never write credentials.
+
 Add a structured `provider.gitlab.token` block. Normalize legacy `token_env`
 and the existing `--token-env` flag into an environment reference. Reject both
 YAML forms together, unknown sources, irrelevant source fields, missing
@@ -48,5 +55,7 @@ logged, serialized, persisted, or cached by the resolver layer.
   OS. Linux/BSD requires a working Secret Service session.
 - Explicit configuration is required; there is intentionally no convenience
   fallback between environment and keychain sources.
+- Keychain mutations are explicit auth-command operations and are covered by
+  fake-backed unit tests; the test suite never touches a user's native store.
 - The legacy configuration remains supported but structured syntax is the
   preferred form for new deployments.

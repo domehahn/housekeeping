@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 
 	"github.com/domehahn/housekeeping/internal/domain"
 )
@@ -48,8 +49,8 @@ func LoadPlan(path string) (domain.Plan, error) {
 		return domain.Plan{}, fmt.Errorf("parse plan file %s: trailing JSON content is not allowed", path)
 	}
 
-	if plan.Version != domain.PlanVersion {
-		return domain.Plan{}, fmt.Errorf("unsupported plan version %d (this build supports version %d)", plan.Version, domain.PlanVersion)
+	if plan.Version < domain.MinimumSupportedPlanVersion || plan.Version > domain.PlanVersion {
+		return domain.Plan{}, fmt.Errorf("unsupported plan version %d (this build supports versions %d-%d)", plan.Version, domain.MinimumSupportedPlanVersion, domain.PlanVersion)
 	}
 	if plan.Provider == "" || plan.Instance == "" || plan.Scope.ID == "" || plan.Scope.Path == "" {
 		return domain.Plan{}, fmt.Errorf("plan file is missing provider/instance/scope metadata")
@@ -129,8 +130,8 @@ func validatePipelineConfigAction(a domain.PlannedAction) error {
 	case domain.ActionReport:
 		return nil
 	case domain.ActionAddPipelineTag:
-		if a.TagValue == "" {
-			return fmt.Errorf("add-pipeline-tag requires a tagValue")
+		if err := validateActionTags(a); err != nil {
+			return fmt.Errorf("add-pipeline-tag: %w", err)
 		}
 		return nil
 	default:
@@ -146,8 +147,8 @@ func validateRunnerAction(a domain.PlannedAction) error {
 	case domain.ActionReport:
 		return nil
 	case domain.ActionAddRunnerTag:
-		if a.TagValue == "" {
-			return fmt.Errorf("add-runner-tag requires a tagValue")
+		if err := validateActionTags(a); err != nil {
+			return fmt.Errorf("add-runner-tag: %w", err)
 		}
 		if a.OutOfScopeProjectCount != len(a.OutOfScopeProjectPaths) {
 			return fmt.Errorf("outOfScopeProjectCount must match the number of outOfScopeProjectPaths")
@@ -156,6 +157,30 @@ func validateRunnerAction(a domain.PlannedAction) error {
 	default:
 		return fmt.Errorf("action %q is invalid for resource type %q", a.Action, a.ResourceType)
 	}
+}
+
+func validateActionTags(a domain.PlannedAction) error {
+	tags := a.Tags()
+	if len(tags) == 0 {
+		return fmt.Errorf("at least one tagValue/tagValues entry is required")
+	}
+	seen := make(map[string]bool, len(tags))
+	for _, tag := range tags {
+		if strings.TrimSpace(tag) == "" {
+			return fmt.Errorf("tags must not be empty or whitespace")
+		}
+		if strings.TrimSpace(tag) != tag {
+			return fmt.Errorf("tag %q must not contain leading or trailing whitespace", tag)
+		}
+		if seen[tag] {
+			return fmt.Errorf("duplicate tag %q", tag)
+		}
+		seen[tag] = true
+	}
+	if a.TagValue != "" && len(a.TagValues) > 0 {
+		return fmt.Errorf("legacy tagValue and tagValues are mutually exclusive")
+	}
+	return nil
 }
 
 // VerifyAgainstInstance guards against a plan created for one provider

@@ -14,6 +14,15 @@ type Keyring interface {
 	Get(service, account string) (string, error)
 }
 
+// KeyringStore adds the mutations used only by explicit auth login/logout
+// commands. Normal credential resolution depends solely on the narrower
+// read-only Keyring interface above.
+type KeyringStore interface {
+	Keyring
+	Set(service, account, value string) error
+	Delete(service, account string) error
+}
+
 // CurrentUser resolves the current operating-system account name.
 type CurrentUser func() (string, error)
 
@@ -39,17 +48,10 @@ func (r KeychainResolver) Resolve(ctx context.Context, ref Reference) (string, e
 
 	account := ref.Account
 	if account == "" {
-		currentUser := r.CurrentUser
-		if currentUser == nil {
-			currentUser = operatingSystemUser
-		}
 		var err error
-		account, err = currentUser()
+		account, err = ResolveAccount("", r.CurrentUser)
 		if err != nil {
-			return "", fmt.Errorf("determine current operating-system user: %w", err)
-		}
-		if account == "" {
-			return "", fmt.Errorf("current operating-system user has an empty username")
+			return "", err
 		}
 	}
 
@@ -74,6 +76,38 @@ type nativeKeyring struct{}
 
 func (nativeKeyring) Get(service, account string) (string, error) {
 	return keyring.Get(service, account)
+}
+
+func (nativeKeyring) Set(service, account, value string) error {
+	return keyring.Set(service, account, value)
+}
+
+func (nativeKeyring) Delete(service, account string) error {
+	return keyring.Delete(service, account)
+}
+
+// NewNativeKeyringStore returns the production OS credential-store adapter.
+func NewNativeKeyringStore() KeyringStore { return nativeKeyring{} }
+
+// IsNotFound reports the native library's portable missing-entry error.
+func IsNotFound(err error) bool { return errors.Is(err, keyring.ErrNotFound) }
+
+// ResolveAccount applies the same current-OS-user default used by resolution.
+func ResolveAccount(account string, currentUser CurrentUser) (string, error) {
+	if account != "" {
+		return account, nil
+	}
+	if currentUser == nil {
+		currentUser = operatingSystemUser
+	}
+	account, err := currentUser()
+	if err != nil {
+		return "", fmt.Errorf("determine current operating-system user: %w", err)
+	}
+	if account == "" {
+		return "", fmt.Errorf("current operating-system user has an empty username")
+	}
+	return account, nil
 }
 
 func operatingSystemUser() (string, error) {

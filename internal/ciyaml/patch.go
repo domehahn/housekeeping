@@ -29,6 +29,7 @@ import (
 	"bytes"
 	"fmt"
 	"io"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 )
@@ -50,6 +51,7 @@ const (
 type Change struct {
 	Kind ChangeKind
 	Job  string
+	Tag  string
 }
 
 // reservedTopLevelKeys are GitLab CI keywords that are never job
@@ -78,8 +80,15 @@ var reservedTopLevelKeys = map[string]bool{
 // no-op case rather than a separate sentinel value, so a re-run never
 // produces a spurious diff.
 func AddTag(content []byte, tag string) (patched []byte, changes []Change, err error) {
-	if tag == "" {
-		return nil, nil, fmt.Errorf("ciyaml: tag must not be empty")
+	return AddTags(content, []string{tag})
+}
+
+// AddTags atomically adds every requested tag while preserving existing tag
+// lists and input order. Duplicate requested tags are ignored.
+func AddTags(content []byte, requested []string) (patched []byte, changes []Change, err error) {
+	tags, err := normalizeTags(requested)
+	if err != nil {
+		return nil, nil, err
 	}
 
 	docs, configDoc, err := decodeGitLabDocuments(content)
@@ -93,19 +102,21 @@ func AddTag(content []byte, tag string) (patched []byte, changes []Change, err e
 
 	var allChanges []Change
 
-	changed, err := ensureDefaultTag(root, tag)
-	if err != nil {
-		return nil, nil, err
-	}
-	if changed {
-		allChanges = append(allChanges, Change{Kind: ChangeDefaultCreated})
-	}
+	for _, tag := range tags {
+		changed, ensureErr := ensureDefaultTag(root, tag)
+		if ensureErr != nil {
+			return nil, nil, ensureErr
+		}
+		if changed {
+			allChanges = append(allChanges, Change{Kind: ChangeDefaultCreated, Tag: tag})
+		}
 
-	jobChanges, err := ensureJobTags(root, tag)
-	if err != nil {
-		return nil, nil, err
+		jobChanges, ensureErr := ensureJobTags(root, tag)
+		if ensureErr != nil {
+			return nil, nil, ensureErr
+		}
+		allChanges = append(allChanges, jobChanges...)
 	}
-	allChanges = append(allChanges, jobChanges...)
 
 	if len(allChanges) == 0 {
 		return content, nil, nil
@@ -116,6 +127,25 @@ func AddTag(content []byte, tag string) (patched []byte, changes []Change, err e
 		return nil, nil, fmt.Errorf("ciyaml: encode patched document: %w", err)
 	}
 	return out, allChanges, nil
+}
+
+func normalizeTags(requested []string) ([]string, error) {
+	seen := make(map[string]bool, len(requested))
+	tags := make([]string, 0, len(requested))
+	for _, raw := range requested {
+		tag := strings.TrimSpace(raw)
+		if tag == "" {
+			return nil, fmt.Errorf("ciyaml: tag must not be empty")
+		}
+		if !seen[tag] {
+			seen[tag] = true
+			tags = append(tags, tag)
+		}
+	}
+	if len(tags) == 0 {
+		return nil, fmt.Errorf("ciyaml: at least one tag is required")
+	}
+	return tags, nil
 }
 
 // HasIncludes reports whether the document has a top-level include: key.
@@ -247,7 +277,7 @@ func ensureJobTags(root *yaml.Node, tag string) ([]Change, error) {
 			return nil, err
 		}
 		if added {
-			changes = append(changes, Change{Kind: ChangeJobAppended, Job: keyNode.Value})
+			changes = append(changes, Change{Kind: ChangeJobAppended, Job: keyNode.Value, Tag: tag})
 		}
 	}
 	return changes, nil
