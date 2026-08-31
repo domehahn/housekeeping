@@ -724,6 +724,7 @@ Dry run is the default.
 | `--confirm-out-of-scope-impact N` | Required when runner plan impact is non-zero | Must exactly equal the plan's explicit external-project count |
 | `--max-actions N` | Optional; config limit | Override the absolute guard for this execution |
 | `--max-percentage N` | Accepted for interface compatibility; no execute-time effect | Percentage needs the discovery total and is enforced during planning only |
+| `--auto-merge-if-no-approval-required` | Optional; `false` | For `add-pipeline-tag`/`replace-pipeline-tag` actions only: merge the opened Merge Request immediately if its project requires zero approvals (GitLab still waits for the Merge Request's own pipeline to succeed first); a Merge Request that does require approval is left open and listed in a separate report instead |
 | global `--audit-log FILE` | Optional | Append one JSONL record per outcome, including dry-run outcomes |
 
 `execution.revalidate` and `execution.fail_fast` are configuration-only; their
@@ -754,6 +755,31 @@ One failed action does not stop unrelated actions unless
 `execution.fail_fast: true`. Already completed actions are idempotent skips.
 Live protection and activity are revalidated by default; runner actions also
 re-resolve scope/reach and perform a final tag-list conflict check.
+
+**Auto-merging a pipeline-tag Merge Request.** By default, `execute` never
+merges anything it opens - "pipelines plan"/"pipelines plan --replace-tag"
+Merge Requests always wait for a human. `--auto-merge-if-no-approval-required`
+is an explicit opt-in that changes this only for `add-pipeline-tag`/
+`replace-pipeline-tag` actions: immediately after a Merge Request is opened
+or corrected, scm-cleaner checks that specific Merge Request's approval
+configuration. If the project requires zero approvals for it, scm-cleaner
+requests that GitLab merge it via GitLab's own `auto_merge`, which still
+waits for the Merge Request's own pipeline to succeed (or merges immediately
+if it has none) - the pipeline gate is never bypassed. If at least one
+approval is required, the Merge Request is left completely untouched and
+instead added to a `NeedsApproval` report (a second table in table output, or
+the `needsApproval` field of the JSON/YAML summary) listing every project and
+Merge Request URL still waiting on a human - ready to paste into a Teams
+channel for approvers. A failure to check approval status or to merge is
+reported inline in that action's detail but never fails the action itself -
+the Merge Request was already opened successfully, which is the primary
+outcome.
+
+```bash
+scm-cleaner execute pipeline-tags.json --apply --non-interactive \
+  --confirm-scope company/platform \
+  --auto-merge-if-no-approval-required
+```
 
 ### 8.9 Machine-readable output
 
@@ -1207,7 +1233,10 @@ that already defines its own `tags:` list. Existing tags are retained. A job
 with no `tags:` of its own is left alone because it inherits from `default:`.
 Changes are
 **never** committed directly: `execute --apply` opens one Merge Request
-per affected project; nothing merges it automatically.
+per affected project; by default nothing merges it automatically (see
+[§8.8](#88-executing-any-saved-plan) for the opt-in
+`--auto-merge-if-no-approval-required`, which only ever merges a Merge
+Request whose project requires zero approvals for it).
 
 Proposal branches include a digest of the patched content. Re-running after
 a partial failure reuses the matching branch and open Merge Request instead

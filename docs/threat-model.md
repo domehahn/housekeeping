@@ -197,8 +197,11 @@ malformed, or interacts badly with a project's actual pipeline semantics
 
 **Mitigations**:
 - The patch (`internal/ciyaml`) never commits directly - it always opens a
-  Merge Request. Nothing in this tool merges it; a human reviews the real
-  diff in GitLab's own MR view before it takes effect.
+  Merge Request. By default, nothing in this tool merges it; a human
+  reviews the real diff in GitLab's own MR view before it takes effect.
+  The opt-in `execute --auto-merge-if-no-approval-required` (see threat
+  14 below) only ever merges a Merge Request the project's own approval
+  rules already require zero human sign-off for.
 - The patch logic only ever adds tags to a `tags:` list; it never removes
   or reorders existing content, and is proven idempotent and
   comment/formatting-preserving by its own unit tests
@@ -267,6 +270,48 @@ one that's already merged.
   and the caller is told which old proposal(s), if any, could not be
   closed, rather than the failure being silently dropped or blocking the
   actual fix.
+
+### 14. Auto-merging a pipeline-tag Merge Request
+
+**Risk**: `execute --auto-merge-if-no-approval-required` merges a
+`add-pipeline-tag`/`replace-pipeline-tag` Merge Request without a human
+looking at the diff first - the exact review step that is otherwise this
+tool's primary mitigation against a malformed or badly-interacting CI
+patch (see threat 11). Merging the wrong Merge Request, merging one that
+actually needed review, or bypassing a project's pipeline gate would all
+be serious failures of this feature specifically.
+
+**Mitigations**:
+- Off by default. It is a single, explicit opt-in flag on `execute`; no
+  existing plan, script, or automation changes behavior unless that flag
+  is passed on that specific invocation.
+- Scoped to exactly the Merge Request scm-cleaner itself just opened or
+  corrected - identified by the URL `ProposePipelineTagChange`/
+  `ProposePipelineTagRename` returned, never a proposal discovered by any
+  other means. It never touches a Merge Request scm-cleaner did not just
+  create in this same action.
+- Merging is conditioned on that specific Merge Request's own approval
+  requirement (`MergeRequestApprovalsService.GetConfiguration`'s
+  `approvals_required`), queried fresh immediately before attempting to
+  merge - not a cached or assumed value. A project/branch/Merge-Request
+  configured to require even one approval is left completely untouched;
+  scm-cleaner only ever merges a change GitLab itself was already going
+  to let through without a human, so this narrows *when* that already-
+  unreviewed change ships, not *whether* it required review.
+- The merge request is made via GitLab's own `auto_merge` (formerly
+  "merge when pipeline succeeds"), so a project's CI pipeline gate is
+  never bypassed - GitLab waits for the Merge Request's own pipeline to
+  succeed (or merges immediately only if it has none) before the merge
+  actually happens.
+- Every Merge Request that does require approval is positively reported
+  in `ExecutionSummary.NeedsApproval` (a table in table output, a
+  `needsApproval` field in JSON/YAML) rather than merely staying open and
+  easy to overlook - the intent is that a human still reviews it, just
+  handed the exact list to do so efficiently.
+- A failure to check approval status or to merge is surfaced in that
+  action's outcome detail but never turned into a failed outcome or
+  retried destructively - the Merge Request itself was already opened
+  successfully, which remains the action's primary, already-safe result.
 
 ## Explicitly Out of Scope (for now)
 

@@ -157,6 +157,18 @@ type RunnerTagUpdater interface {
 	UpdateRunnerTags(ctx context.Context, runnerID string, expectedTags, tags []string) error
 }
 
+// PipelineTagMerger inspects a scm-cleaner pipeline-tag Merge Request's
+// approval requirement and, only if the project's approval rules require
+// zero approvals for it, requests that GitLab merge it - instructing
+// GitLab to wait for the Merge Request's own pipeline to succeed first
+// (or merge immediately if it has none), never bypassing a required
+// pipeline gate. merged=false, requiresApproval=true (nil error) means
+// the Merge Request needs at least one approval and was intentionally
+// left open for a human to review.
+type PipelineTagMerger interface {
+	MergeIfNoApprovalRequired(ctx context.Context, projectID, mergeRequestURL string) (merged bool, requiresApproval bool, err error)
+}
+
 // CurrentUserResolver identifies the authenticated caller so it can be
 // automatically excluded from destructive user operations.
 type CurrentUserResolver interface {
@@ -196,6 +208,7 @@ type Client interface {
 	PipelineConfigProposer
 	PipelineConfigAnalyzer
 	PipelineProposalReporter
+	PipelineTagMerger
 	RunnerScanner
 	RunnerTagUpdater
 }

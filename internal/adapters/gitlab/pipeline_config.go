@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 
 	gitlab "gitlab.com/gitlab-org/api/client-go"
@@ -202,6 +203,50 @@ func (a *Adapter) closeStaleTagProposals(ctx context.Context, projectID string, 
 		}
 	}
 	return closedURLs
+}
+
+// MergeIfNoApprovalRequired inspects mergeRequestURL's approval
+// configuration and, only when zero approvals are required, requests
+// that GitLab merge it - passing AutoMerge so GitLab waits for the
+// Merge Request's own pipeline to succeed (or merges immediately if it
+// has none) rather than bypassing a pipeline gate. When at least one
+// approval is required, it is left entirely alone and reported back via
+// requiresApproval so the caller can surface it for a human approver.
+func (a *Adapter) MergeIfNoApprovalRequired(ctx context.Context, projectID, mergeRequestURL string) (merged bool, requiresApproval bool, err error) {
+	iid, err := mergeRequestIIDFromURL(mergeRequestURL)
+	if err != nil {
+		return false, false, err
+	}
+	config, _, err := a.gl.MergeRequestApprovals.GetConfiguration(projectID, iid, gitlab.WithContext(ctx))
+	if err != nil {
+		return false, false, classify(fmt.Sprintf("get approval configuration for %s", mergeRequestURL), err)
+	}
+	if config.ApprovalsRequired > 0 {
+		return false, true, nil
+	}
+	if _, _, err := a.gl.MergeRequests.AcceptMergeRequest(projectID, iid, &gitlab.AcceptMergeRequestOptions{
+		AutoMerge: gitlab.Ptr(true),
+	}, gitlab.WithContext(ctx)); err != nil {
+		return false, false, classify(fmt.Sprintf("merge %s", mergeRequestURL), err)
+	}
+	return true, false, nil
+}
+
+var mergeRequestIIDPattern = regexp.MustCompile(`/merge_requests/(\d+)(?:[/?#]|$)`)
+
+// mergeRequestIIDFromURL extracts the numeric IID from a GitLab Merge
+// Request web URL (".../-/merge_requests/<iid>"), the only form
+// ProposePipelineTagChange/ProposePipelineTagRename ever return.
+func mergeRequestIIDFromURL(url string) (int64, error) {
+	m := mergeRequestIIDPattern.FindStringSubmatch(url)
+	if len(m) != 2 {
+		return 0, fmt.Errorf("gitlab: could not parse a merge request IID from URL %q", url)
+	}
+	iid, err := strconv.ParseInt(m[1], 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("gitlab: invalid merge request IID in URL %q: %w", url, err)
+	}
+	return iid, nil
 }
 
 func oldTagsOf(renames []domain.TagRename) []string {
