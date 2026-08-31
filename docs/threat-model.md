@@ -243,6 +243,31 @@ if it is shared.
   update, so an external change in the narrow GET-to-PUT interval remains a
   residual risk and must be monitored through GitLab/audit history.
 
+### 13. Automatically closing a stale scm-cleaner proposal
+
+**Risk**: `--replace-tag` best-effort closes any still-open scm-cleaner
+Merge Request that proposed one of the old (wrong) tags, so that the
+corrected proposal supersedes it. Automatically changing the state of a
+Merge Request a human may already be reviewing carries its own risk if
+scoped incorrectly - it must never close a proposal it didn't create, or
+one that's already merged.
+
+**Mitigations**:
+- Only a proposal matching the exact old tag set via the same
+  cryptographic tag-set marker `ListPipelineTagProposals` already uses for
+  status reporting is ever considered - an unrelated Merge Request, or one
+  proposing a different tag set, is never touched.
+- Only a proposal currently in the `opened` state is closed; a merged or
+  already-closed proposal is left alone.
+- Closing (not deleting) is fully reversible - a human can reopen the
+  Merge Request in GitLab at any time, and its discussion/review history
+  is preserved.
+- Closing is entirely best-effort: a lookup or close failure is never
+  fatal to the rename itself. The corrected Merge Request still opens,
+  and the caller is told which old proposal(s), if any, could not be
+  closed, rather than the failure being silently dropped or blocking the
+  actual fix.
+
 ## Explicitly Out of Scope (for now)
 
 - Protecting against a fully compromised operator workstation (keylogging,

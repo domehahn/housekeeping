@@ -75,6 +75,28 @@ operator never intended to touch.
 - `pipelines proposals status` reports the most recently updated Merge Request
   whose deterministic branch prefix matches the exact normalized tag set. It
   is status reporting only; scm-cleaner never merges the proposal.
+- `--replace-tag OLD:NEW` corrects a wrong tag already rolled out (the
+  motivating case: a case typo like `AKS` vs `aks` - GitLab tags have no
+  case-folding, so the two are entirely distinct to the scheduler).
+  `ciyaml.ReplaceTag`/`ReplaceTags` are deliberately **narrower** than
+  `AddTag`/`AddTags`: they only ever touch a `default.tags` or job `tags:`
+  list that **already contains** the old tag, removing it and adding the
+  new one if not already present - never creating a `default:` block,
+  never touching a job that never had the old tag. A rename's diff is
+  exactly "the places that had the mistake," nothing broader. `--tag` and
+  `--replace-tag` are mutually exclusive on the same invocation, so a
+  plan's diff and Merge Request are never ambiguous about which mode
+  produced them.
+- Opening the corrected Merge Request additionally, best-effort, closes
+  any still-open scm-cleaner proposal that proposed one of the old tags -
+  identified via the same cryptographic tag-set marker
+  `ListPipelineTagProposals` already uses for status reporting, so only
+  scm-cleaner's own matching proposals are ever touched, never an
+  unrelated Merge Request. Closing (not deleting) is reversible via
+  reopening in GitLab, only an `opened`-state proposal is ever closed, and
+  a failure to close is never fatal to the rename itself - the corrected
+  MR still opens, and the caller is told which old proposal(s), if any,
+  could not be closed.
 
 **Runner tags (`runners` command):**
 
@@ -105,6 +127,14 @@ operator never intended to touch.
 - Immediately before mutation, execution re-resolves the group and project
   set, re-fetches runner details, and compares live out-of-scope paths to the
   confirmed plan. Any difference requires a newly reviewed plan.
+- `--replace-tag OLD:NEW` reuses the exact same compare-and-swap
+  (`UpdateRunnerTags` already replaces the whole list, so no new runner
+  provider port was needed) and the exact same out-of-scope-impact guard
+  as adding a tag. The desired list is computed per rename pair: a rename
+  whose old tag is not present on a given runner is left entirely alone
+  (mirroring `ciyaml.ReplaceTags`' "only touch what had the old tag"
+  contract), so a runner never spuriously gains the new tag without ever
+  having carried the old one.
 
 ## Consequences
 

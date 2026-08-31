@@ -26,6 +26,10 @@ func (f *fakePipelineConfigReader) ProposePipelineTagChange(context.Context, str
 	return "", nil
 }
 
+func (f *fakePipelineConfigReader) ProposePipelineTagRename(context.Context, string, []byte, []domain.TagRename) (string, []string, error) {
+	return "", nil, nil
+}
+
 func TestEvaluatePipelineTags_ClassifiesEveryStatus(t *testing.T) {
 	reader := &fakePipelineConfigReader{
 		files: map[string][]byte{

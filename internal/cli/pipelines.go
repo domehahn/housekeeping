@@ -31,6 +31,12 @@ Changes are never committed directly: "pipelines plan" followed by
 "execute --apply" opens one Merge Request per affected project. A human
 always reviews and merges it - nothing here merges automatically.
 
+Use --replace-tag OLD:NEW instead of --tag to correct a wrong tag already
+rolled out (e.g. a case typo like "AKS" vs "aks"): only locations that
+actually have the old tag are touched, and any still-open scm-cleaner
+Merge Request that proposed the old tag is automatically closed when the
+corrected one is opened.
+
 Use "pipelines analyze" to inspect GitLab's include-expanded effective
 configuration. Included sources are never modified. See
 docs/adr/0005-ci-tag-management-scope.md for the full rationale.`,
@@ -84,18 +90,32 @@ func newPipelinesListCmd(e *env) *cobra.Command {
 }
 
 func newPipelinesEvaluateCmd(e *env) *cobra.Command {
-	var tags, includeProjects, excludeProjects []string
+	var tags, replaceTags, includeProjects, excludeProjects []string
 	cmd := &cobra.Command{
 		Use:   "evaluate",
 		Short: "Check every project's .gitlab-ci.yml for CI tags, without producing a plan",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			normalizedTags, err := app.NormalizeTags(tags)
-			if err != nil {
+			if err := requireExactlyOneTagMode(tags, replaceTags); err != nil {
 				return exitErr(ExitInvalidConfiguration, err)
 			}
 			client, err := e.requireClient()
 			if err != nil {
 				return err
+			}
+			if len(replaceTags) > 0 {
+				renames, err := parseTagRenames(replaceTags)
+				if err != nil {
+					return exitErr(ExitInvalidConfiguration, err)
+				}
+				summary, scope, err := runPipelineTagRenameEvaluation(cmd, e, client, renames, includeProjects, excludeProjects)
+				if err != nil {
+					return err
+				}
+				return renderPipelineTagEvaluation(cmd, e, scope, summary)
+			}
+			normalizedTags, err := app.NormalizeTags(tags)
+			if err != nil {
+				return exitErr(ExitInvalidConfiguration, err)
 			}
 			summary, scope, err := runPipelineTagEvaluation(cmd, e, client, normalizedTags, includeProjects, excludeProjects)
 			if err != nil {
@@ -104,20 +124,19 @@ func newPipelinesEvaluateCmd(e *env) *cobra.Command {
 			return renderPipelineTagEvaluation(cmd, e, scope, summary)
 		},
 	}
-	addPipelineSelectionFlags(cmd, &tags, &includeProjects, &excludeProjects)
+	addPipelineSelectionFlags(cmd, &tags, &replaceTags, &includeProjects, &excludeProjects)
 	return cmd
 }
 
 func newPipelinesPlanCmd(e *env) *cobra.Command {
-	var tags, includeProjects, excludeProjects []string
+	var tags, replaceTags, includeProjects, excludeProjects []string
 	var outputPlan string
 	var maxActions, maxPercentage, batchSize int
 	cmd := &cobra.Command{
 		Use:   "plan",
 		Short: "Evaluate .gitlab-ci.yml tags and produce a reviewable, saveable plan of Merge Request proposals",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			normalizedTags, err := app.NormalizeTags(tags)
-			if err != nil {
+			if err := requireExactlyOneTagMode(tags, replaceTags); err != nil {
 				return exitErr(ExitInvalidConfiguration, err)
 			}
 			if batchSize < 0 {
@@ -130,18 +149,16 @@ func newPipelinesPlanCmd(e *env) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			summary, scope, err := runPipelineTagEvaluation(cmd, e, client, normalizedTags, includeProjects, excludeProjects)
-			if err != nil {
-				return err
-			}
 
 			info, err := client.Info(cmd.Context())
 			if err != nil {
 				return wrapProviderErr(err)
 			}
 
-			matched := summary.Matched()
-			plan := app.BuildPipelineTagPlan(info.Provider, info.Instance, scope, matched, normalizedTags, e.clock)
+			summary, scope, plan, err := evaluateAndBuildPipelinePlan(cmd, e, client, info, tags, replaceTags, includeProjects, excludeProjects)
+			if err != nil {
+				return err
+			}
 
 			limits := resolveSafetyLimits(e, maxActions, maxPercentage, domain.ResourceTypePipelineConfig)
 			discovered := map[domain.ResourceType]int{domain.ResourceTypePipelineConfig: summary.Discovered()}
@@ -184,12 +201,44 @@ func newPipelinesPlanCmd(e *env) *cobra.Command {
 			return output.Render(cmd.OutOrStdout(), e.format, planTable(plan), plan)
 		},
 	}
-	addPipelineSelectionFlags(cmd, &tags, &includeProjects, &excludeProjects)
+	addPipelineSelectionFlags(cmd, &tags, &replaceTags, &includeProjects, &excludeProjects)
 	cmd.Flags().StringVar(&outputPlan, "output-plan", "", "write the plan as JSON to this path")
 	cmd.Flags().IntVar(&batchSize, "batch-size", 0, "split matched projects into deterministic plans of at most N actions")
 	cmd.Flags().IntVar(&maxActions, "max-actions", 0, "override safety.max_actions.pipeline_tags (must be explicit)")
 	cmd.Flags().IntVar(&maxPercentage, "max-percentage", 0, "override safety.max_percentage.pipeline_tags (must be explicit)")
 	return cmd
+}
+
+// evaluateAndBuildPipelinePlan evaluates the requested tags/renames and
+// builds the corresponding plan, keeping the add-tag and replace-tag
+// branches of "pipelines plan" out of RunE for readability.
+func evaluateAndBuildPipelinePlan(
+	cmd *cobra.Command, e *env, client provider.Client, info provider.Info,
+	tags, replaceTags, includeProjects, excludeProjects []string,
+) (app.PipelineTagEvaluationSummary, domain.Scope, domain.Plan, error) {
+	if len(replaceTags) > 0 {
+		renames, err := parseTagRenames(replaceTags)
+		if err != nil {
+			return app.PipelineTagEvaluationSummary{}, domain.Scope{}, domain.Plan{}, exitErr(ExitInvalidConfiguration, err)
+		}
+		summary, scope, err := runPipelineTagRenameEvaluation(cmd, e, client, renames, includeProjects, excludeProjects)
+		if err != nil {
+			return app.PipelineTagEvaluationSummary{}, domain.Scope{}, domain.Plan{}, err
+		}
+		plan := app.BuildPipelineTagRenamePlan(info.Provider, info.Instance, scope, summary.Matched(), renames, e.clock)
+		return summary, scope, plan, nil
+	}
+
+	normalizedTags, err := app.NormalizeTags(tags)
+	if err != nil {
+		return app.PipelineTagEvaluationSummary{}, domain.Scope{}, domain.Plan{}, exitErr(ExitInvalidConfiguration, err)
+	}
+	summary, scope, err := runPipelineTagEvaluation(cmd, e, client, normalizedTags, includeProjects, excludeProjects)
+	if err != nil {
+		return app.PipelineTagEvaluationSummary{}, domain.Scope{}, domain.Plan{}, err
+	}
+	plan := app.BuildPipelineTagPlan(info.Provider, info.Instance, scope, summary.Matched(), normalizedTags, e.clock)
+	return summary, scope, plan, nil
 }
 
 func runPipelineTagEvaluation(cmd *cobra.Command, e *env, client provider.Client, tags, includeProjects, excludeProjects []string) (app.PipelineTagEvaluationSummary, domain.Scope, error) {
@@ -221,8 +270,50 @@ func runPipelineTagEvaluation(cmd *cobra.Command, e *env, client provider.Client
 	return summary, scope, nil
 }
 
-func addPipelineSelectionFlags(cmd *cobra.Command, tags, includes, excludes *[]string) {
-	cmd.Flags().StringArrayVar(tags, "tag", nil, "CI tag to check for/add; repeat for multiple tags (required)")
+func runPipelineTagRenameEvaluation(cmd *cobra.Command, e *env, client provider.Client, renames []domain.TagRename, includeProjects, excludeProjects []string) (app.PipelineTagEvaluationSummary, domain.Scope, error) {
+	group, recursive, err := resolveGroupFlag(e, cmd)
+	if err != nil {
+		return app.PipelineTagEvaluationSummary{}, domain.Scope{}, err
+	}
+	ctx := cmd.Context()
+	scope, err := app.ResolveScope(ctx, client, group, recursive)
+	if err != nil {
+		return app.PipelineTagEvaluationSummary{}, domain.Scope{}, wrapProviderErr(err)
+	}
+	projects, err := app.DiscoverProjects(ctx, client, scope)
+	if err != nil {
+		return app.PipelineTagEvaluationSummary{}, domain.Scope{}, wrapProviderErr(err)
+	}
+	projects, err = app.FilterPipelineProjects(projects, includeProjects, excludeProjects)
+	if err != nil {
+		return app.PipelineTagEvaluationSummary{}, domain.Scope{}, exitErr(ExitInvalidConfiguration, err)
+	}
+
+	protection, err := project.NewProtection(e.cfg.Projects.Protection.Paths, e.cfg.Projects.Protection.Regex)
+	if err != nil {
+		return app.PipelineTagEvaluationSummary{}, domain.Scope{}, exitErr(ExitInvalidConfiguration, err)
+	}
+
+	summary := app.EvaluatePipelineTagRename(ctx, client, projects, renames, protection, e.cfg.Performance.Workers)
+	summary.Scope = scope
+	return summary, scope, nil
+}
+
+func addPipelineSelectionFlags(cmd *cobra.Command, tags, replaceTags, includes, excludes *[]string) {
+	cmd.Flags().StringArrayVar(tags, "tag", nil, "CI tag to check for/add; repeat for multiple tags; mutually exclusive with --replace-tag (one of the two is required)")
+	cmd.Flags().StringArrayVar(replaceTags, "replace-tag", nil, "OLD:NEW - correct a wrong CI tag already rolled out; repeat for multiple corrections; mutually exclusive with --tag")
+	addPipelineProjectFilterFlags(cmd, includes, excludes)
+}
+
+// addPipelineTagFlag registers just --tag plus the project filter flags,
+// for read-only commands (analyze, proposals status) that only ever check
+// tag presence and have no rename semantics of their own.
+func addPipelineTagFlag(cmd *cobra.Command, tags, includes, excludes *[]string) {
+	cmd.Flags().StringArrayVar(tags, "tag", nil, "CI tag to check for; repeat for multiple tags (required)")
+	addPipelineProjectFilterFlags(cmd, includes, excludes)
+}
+
+func addPipelineProjectFilterFlags(cmd *cobra.Command, includes, excludes *[]string) {
 	cmd.Flags().StringArrayVar(includes, "include-project", nil, "include project full paths matching this regex; repeatable")
 	cmd.Flags().StringArrayVar(excludes, "exclude-project", nil, "exclude project full paths matching this regex; repeatable; takes precedence")
 }

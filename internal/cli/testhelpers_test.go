@@ -51,6 +51,11 @@ type fakeClient struct {
 	ciIncludes   map[string][]domain.PipelineInclude
 	proposals    map[string][]domain.PipelineProposal
 
+	renameURL          string
+	renameErr          error
+	closedProposalURLs []string
+	renamedTags        map[string][]domain.TagRename
+
 	runners    []domain.Runner
 	runnersErr error
 	runnerTags map[string][]string
@@ -69,6 +74,7 @@ func newFakeClient() *fakeClient {
 		mergedCI:        map[string][]byte{},
 		ciIncludes:      map[string][]domain.PipelineInclude{},
 		proposals:       map[string][]domain.PipelineProposal{},
+		renamedTags:     map[string][]domain.TagRename{},
 		runnerTags:      map[string][]string{},
 		deletedProjects: map[string]bool{},
 		removedMembers:  map[string]bool{},
@@ -139,6 +145,13 @@ func (f *fakeClient) ProposePipelineTagChange(_ context.Context, projectID strin
 	}
 	f.proposedTags[projectID] = append([]string{}, tags...)
 	return f.proposeURL, nil
+}
+func (f *fakeClient) ProposePipelineTagRename(_ context.Context, projectID string, _ []byte, renames []domain.TagRename) (string, []string, error) {
+	if f.renameErr != nil {
+		return "", nil, f.renameErr
+	}
+	f.renamedTags[projectID] = append([]domain.TagRename{}, renames...)
+	return f.renameURL, f.closedProposalURLs, nil
 }
 func (f *fakeClient) GetMergedPipelineConfig(_ context.Context, projectID string) ([]byte, []domain.PipelineInclude, error) {
 	return f.mergedCI[projectID], f.ciIncludes[projectID], nil

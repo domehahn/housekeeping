@@ -134,6 +134,11 @@ func validatePipelineConfigAction(a domain.PlannedAction) error {
 			return fmt.Errorf("add-pipeline-tag: %w", err)
 		}
 		return nil
+	case domain.ActionReplacePipelineTag:
+		if err := validateActionTagRenames(a); err != nil {
+			return fmt.Errorf("replace-pipeline-tag: %w", err)
+		}
+		return nil
 	default:
 		return fmt.Errorf("action %q is invalid for resource type %q", a.Action, a.ResourceType)
 	}
@@ -149,6 +154,14 @@ func validateRunnerAction(a domain.PlannedAction) error {
 	case domain.ActionAddRunnerTag:
 		if err := validateActionTags(a); err != nil {
 			return fmt.Errorf("add-runner-tag: %w", err)
+		}
+		if a.OutOfScopeProjectCount != len(a.OutOfScopeProjectPaths) {
+			return fmt.Errorf("outOfScopeProjectCount must match the number of outOfScopeProjectPaths")
+		}
+		return nil
+	case domain.ActionReplaceRunnerTag:
+		if err := validateActionTagRenames(a); err != nil {
+			return fmt.Errorf("replace-runner-tag: %w", err)
 		}
 		if a.OutOfScopeProjectCount != len(a.OutOfScopeProjectPaths) {
 			return fmt.Errorf("outOfScopeProjectCount must match the number of outOfScopeProjectPaths")
@@ -179,6 +192,31 @@ func validateActionTags(a domain.PlannedAction) error {
 	}
 	if a.TagValue != "" && len(a.TagValues) > 0 {
 		return fmt.Errorf("legacy tagValue and tagValues are mutually exclusive")
+	}
+	return nil
+}
+
+func validateActionTagRenames(a domain.PlannedAction) error {
+	if len(a.TagRenames) == 0 {
+		return fmt.Errorf("at least one tagRenames entry is required")
+	}
+	seen := make(map[string]bool, len(a.TagRenames))
+	for _, r := range a.TagRenames {
+		old := strings.TrimSpace(r.Old)
+		next := strings.TrimSpace(r.New)
+		if old == "" || next == "" {
+			return fmt.Errorf("tagRenames old/new must not be empty or whitespace")
+		}
+		if old != r.Old || next != r.New {
+			return fmt.Errorf("tagRenames old/new must not contain leading or trailing whitespace")
+		}
+		if old == next {
+			return fmt.Errorf("tagRenames old and new must differ (got %q)", old)
+		}
+		if seen[old] {
+			return fmt.Errorf("duplicate tagRenames old value %q", old)
+		}
+		seen[old] = true
 	}
 	return nil
 }

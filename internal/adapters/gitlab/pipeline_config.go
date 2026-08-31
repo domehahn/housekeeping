@@ -65,7 +65,8 @@ func (a *Adapter) ProposePipelineTagChange(ctx context.Context, projectID string
 		return "", err
 	}
 
-	if err := a.ensureProposalContent(ctx, projectID, branchName, patchedContent, tags); err != nil {
+	commitMsg := fmt.Sprintf("scm-cleaner: add CI tags %s to .gitlab-ci.yml", strings.Join(canonicalTags(tags), ", "))
+	if err := a.ensureProposalContent(ctx, projectID, branchName, patchedContent, commitMsg); err != nil {
 		return "", err
 	}
 	if url, ok, err := a.findOpenProposal(ctx, projectID, branchName, proj.DefaultBranch); err != nil || ok {
@@ -99,6 +100,147 @@ func (a *Adapter) ProposePipelineTagChange(ctx context.Context, projectID string
 		return "", classified
 	}
 	return mr.WebURL, nil
+}
+
+// ProposePipelineTagRename opens a branch off the project's default branch,
+// commits patchedContent (the result of ciyaml.ReplaceTags) as the new
+// .gitlab-ci.yml on it, and opens or reuses a Merge Request back to the
+// default branch. Before doing so, it best-effort closes any still-open
+// scm-cleaner proposal that proposed one of the old tags - see
+// closeSupersededProposals. It never commits directly to the default
+// branch - see docs/adr/0005-ci-tag-management-scope.md.
+func (a *Adapter) ProposePipelineTagRename(ctx context.Context, projectID string, patchedContent []byte, renames []domain.TagRename) (string, []string, error) {
+	proj, _, err := a.gl.Projects.GetProject(projectID, &gitlab.GetProjectOptions{}, gitlab.WithContext(ctx))
+	if err != nil {
+		return "", nil, classify("get project "+projectID, err)
+	}
+	if proj.DefaultBranch == "" {
+		return "", nil, fmt.Errorf("gitlab: project %s has no default branch (empty repository)", projectID)
+	}
+
+	branchName := renameBranchName(renames, patchedContent)
+	if err := a.ensureProposalBranch(ctx, projectID, branchName, proj.DefaultBranch); err != nil {
+		return "", nil, err
+	}
+
+	commitMsg := fmt.Sprintf("scm-cleaner: rename CI tag(s) %s in .gitlab-ci.yml", renameSummary(renames))
+	if err := a.ensureProposalContent(ctx, projectID, branchName, patchedContent, commitMsg); err != nil {
+		return "", nil, err
+	}
+
+	closedURLs := a.closeSupersededProposals(ctx, projectID, renames)
+
+	if url, ok, err := a.findOpenProposal(ctx, projectID, branchName, proj.DefaultBranch); err != nil || ok {
+		return url, closedURLs, err
+	}
+
+	summary := renameSummary(renames)
+	title := fmt.Sprintf("scm-cleaner: rename CI tag(s) %s", summary)
+	description := fmt.Sprintf(
+		"This Merge Request was proposed by scm-cleaner.\n\n"+
+			"It corrects the CI tag(s) %s in `default.tags` and any job that "+
+			"already had the old tag in its own `tags:` list, in `%s`. Only "+
+			"locations that actually had the old tag are touched.\n\n"+
+			"scm-cleaner never merges this automatically - please review the diff "+
+			"before merging.\n\n%s", summary, gitlabCIFilePath, renameProposalMarker(renames))
+	mr, _, err := a.gl.MergeRequests.CreateMergeRequest(projectID, &gitlab.CreateMergeRequestOptions{
+		Title:              &title,
+		Description:        &description,
+		SourceBranch:       &branchName,
+		TargetBranch:       &proj.DefaultBranch,
+		RemoveSourceBranch: gitlab.Ptr(true),
+	}, gitlab.WithContext(ctx))
+	if err != nil {
+		classified := classify(fmt.Sprintf("create merge request from %s on project %s", branchName, projectID), err)
+		var pErr *provider.Error
+		if errors.As(classified, &pErr) && pErr.Kind == provider.KindConflict {
+			if url, ok, findErr := a.findOpenProposal(ctx, projectID, branchName, proj.DefaultBranch); findErr == nil && ok {
+				return url, closedURLs, nil
+			}
+		}
+		return "", closedURLs, classified
+	}
+	return mr.WebURL, closedURLs, nil
+}
+
+// closeSupersededProposals looks up, for every rename's old tag, any
+// still-open scm-cleaner proposal that proposed exactly that old tag
+// (via ListPipelineTagProposals' existing cryptographic tag-set marker
+// match, so only scm-cleaner's own matching proposals are ever touched)
+// and closes it. This is entirely best-effort: a lookup or close failure
+// is silently skipped rather than propagated, since failing to tidy up an
+// old, now-superseded proposal must never block or fail the actual
+// rename. Callers surface only what was actually closed.
+func (a *Adapter) closeSupersededProposals(ctx context.Context, projectID string, renames []domain.TagRename) []string {
+	var closedURLs []string
+	seen := make(map[string]bool)
+	for _, r := range renames {
+		proposals, err := a.ListPipelineTagProposals(ctx, projectID, []string{r.Old})
+		if err != nil {
+			continue
+		}
+		for _, p := range proposals {
+			if p.State != "opened" || p.IID == 0 || seen[p.URL] {
+				continue
+			}
+			if _, _, closeErr := a.gl.MergeRequests.UpdateMergeRequest(projectID, p.IID, &gitlab.UpdateMergeRequestOptions{
+				StateEvent: gitlab.Ptr("close"),
+			}, gitlab.WithContext(ctx)); closeErr != nil {
+				continue
+			}
+			seen[p.URL] = true
+			closedURLs = append(closedURLs, p.URL)
+		}
+	}
+	return closedURLs
+}
+
+func renameBranchName(renames []domain.TagRename, content []byte) string {
+	sum := sha256.Sum256(content)
+	slug := slugifyTag(renameSlugSource(renames))
+	if len(slug) > 40 {
+		slug = slug[:40]
+	}
+	return fmt.Sprintf("scm-cleaner/rename-tag-%s-%x", slug, sum[:6])
+}
+
+func renameSlugSource(renames []domain.TagRename) string {
+	parts := make([]string, 0, len(renames))
+	for _, r := range canonicalRenames(renames) {
+		parts = append(parts, r.Old+"-to-"+r.New)
+	}
+	return strings.Join(parts, "-")
+}
+
+func canonicalRenames(renames []domain.TagRename) []domain.TagRename {
+	out := append([]domain.TagRename{}, renames...)
+	slices.SortFunc(out, func(a, b domain.TagRename) int {
+		if a.Old != b.Old {
+			return strings.Compare(a.Old, b.Old)
+		}
+		return strings.Compare(a.New, b.New)
+	})
+	return out
+}
+
+func renameProposalMarker(renames []domain.TagRename) string {
+	var sb strings.Builder
+	for _, r := range canonicalRenames(renames) {
+		sb.WriteString(r.Old)
+		sb.WriteString("\x00")
+		sb.WriteString(r.New)
+		sb.WriteString("\x01")
+	}
+	sum := sha256.Sum256([]byte(sb.String()))
+	return fmt.Sprintf("<!-- scm-cleaner-tag-renames-sha256: %x -->", sum)
+}
+
+func renameSummary(renames []domain.TagRename) string {
+	parts := make([]string, 0, len(renames))
+	for _, r := range canonicalRenames(renames) {
+		parts = append(parts, fmt.Sprintf("%s -> %s", r.Old, r.New))
+	}
+	return strings.Join(parts, ", ")
 }
 
 func proposalBranchName(tags []string, content []byte) string {
@@ -152,7 +294,7 @@ func (a *Adapter) ensureProposalBranch(ctx context.Context, projectID, branchNam
 	return nil
 }
 
-func (a *Adapter) ensureProposalContent(ctx context.Context, projectID, branchName string, patchedContent []byte, tags []string) error {
+func (a *Adapter) ensureProposalContent(ctx context.Context, projectID, branchName string, patchedContent []byte, commitMsg string) error {
 	current, _, err := a.gl.RepositoryFiles.GetRawFile(projectID, gitlabCIFilePath, &gitlab.GetRawFileOptions{Ref: &branchName}, gitlab.WithContext(ctx))
 	if err != nil {
 		return classify(fmt.Sprintf("read %s on branch %s", gitlabCIFilePath, branchName), err)
@@ -161,7 +303,6 @@ func (a *Adapter) ensureProposalContent(ctx context.Context, projectID, branchNa
 		return nil
 	}
 	content := string(patchedContent)
-	commitMsg := fmt.Sprintf("scm-cleaner: add CI tags %s to .gitlab-ci.yml", strings.Join(canonicalTags(tags), ", "))
 	_, _, err = a.gl.RepositoryFiles.UpdateFile(projectID, gitlabCIFilePath, &gitlab.UpdateFileOptions{
 		Branch: &branchName, Content: &content, CommitMessage: &commitMsg,
 	}, gitlab.WithContext(ctx))
@@ -212,7 +353,7 @@ func (a *Adapter) ListPipelineTagProposals(ctx context.Context, projectID string
 			legacySingleTagTitle := len(tags) == 1 && mr.Title == fmt.Sprintf("scm-cleaner: add CI tag %q", tags[0])
 			if strings.HasPrefix(mr.SourceBranch, prefix) && (strings.Contains(mr.Description, marker) || legacySingleTagTitle) {
 				proposals = append(proposals, domain.PipelineProposal{
-					ProjectID: projectID, Title: mr.Title, State: mr.State, SourceBranch: mr.SourceBranch, URL: mr.WebURL,
+					ProjectID: projectID, IID: mr.IID, Title: mr.Title, State: mr.State, SourceBranch: mr.SourceBranch, URL: mr.WebURL,
 				})
 			}
 		}

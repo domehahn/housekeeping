@@ -47,7 +47,7 @@ It is read-only and never modifies an included source.`,
 			return output.Render(cmd.OutOrStdout(), e.format, table, results)
 		},
 	}
-	addPipelineSelectionFlags(cmd, &tags, &includes, &excludes)
+	addPipelineTagFlag(cmd, &tags, &includes, &excludes)
 	return cmd
 }
 
@@ -99,7 +99,7 @@ func newPipelinesProposalsStatusCmd(e *env) *cobra.Command {
 			return output.Render(cmd.OutOrStdout(), e.format, table, statuses)
 		},
 	}
-	addPipelineSelectionFlags(cmd, &tags, &includes, &excludes)
+	addPipelineTagFlag(cmd, &tags, &includes, &excludes)
 	return cmd
 }
 

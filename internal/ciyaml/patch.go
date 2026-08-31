@@ -32,6 +32,8 @@ import (
 	"strings"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/domehahn/housekeeping/internal/domain"
 )
 
 // ChangeKind classifies a single edit AddTag made.
@@ -44,14 +46,22 @@ const (
 	// ChangeJobAppended means an existing job (or hidden template) already
 	// had its own tags: list, and the tag was appended to it.
 	ChangeJobAppended ChangeKind = "job_appended"
+	// ChangeDefaultReplaced means the document's default.tags list
+	// contained the old tag, which was replaced with the new one.
+	ChangeDefaultReplaced ChangeKind = "default_replaced"
+	// ChangeJobReplaced means a job's (or hidden template's) own tags:
+	// list contained the old tag, which was replaced with the new one.
+	ChangeJobReplaced ChangeKind = "job_replaced"
 )
 
-// Change describes one edit made by AddTag. Job is empty for the
-// default: block.
+// Change describes one edit made by AddTag/AddTags or ReplaceTag/ReplaceTags.
+// Job is empty for the default: block. OldTag is set only for the two
+// *Replaced kinds, naming the tag that was removed.
 type Change struct {
-	Kind ChangeKind
-	Job  string
-	Tag  string
+	Kind   ChangeKind
+	Job    string
+	Tag    string
+	OldTag string
 }
 
 // reservedTopLevelKeys are GitLab CI keywords that are never job
@@ -114,6 +124,80 @@ func AddTags(content []byte, requested []string) (patched []byte, changes []Chan
 		jobChanges, ensureErr := ensureJobTags(root, tag)
 		if ensureErr != nil {
 			return nil, nil, ensureErr
+		}
+		allChanges = append(allChanges, jobChanges...)
+	}
+
+	if len(allChanges) == 0 {
+		return content, nil, nil
+	}
+
+	out, err := marshalDocuments(docs)
+	if err != nil {
+		return nil, nil, fmt.Errorf("ciyaml: encode patched document: %w", err)
+	}
+	return out, allChanges, nil
+}
+
+// ReplaceTag corrects a single wrong tag (e.g. a case typo like "AKS" ->
+// "aks") to the right one. See ReplaceTags for the exact semantics.
+func ReplaceTag(content []byte, oldTag, newTag string) (patched []byte, changes []Change, err error) {
+	return ReplaceTags(content, []domain.TagRename{{Old: oldTag, New: newTag}})
+}
+
+// ReplaceTags corrects one or more wrong tags to their right values.
+//
+// Unlike AddTags, this is deliberately narrow: it only ever touches a
+// default.tags or job tags: list that already contains the old tag,
+// removing it and adding the new tag if not already present. It never
+// creates a default: block, and never touches a job's tags: list that
+// doesn't contain the old tag - a rename's diff is exactly "the places
+// that had the mistake," nothing broader. If an old tag appears nowhere,
+// that rename is a no-op; if none of the requested renames find anything
+// to change, ReplaceTags returns the input content byte-for-byte
+// unchanged and a nil Changes slice, matching AddTags' idempotent
+// no-op contract.
+func ReplaceTags(content []byte, renames []domain.TagRename) (patched []byte, changes []Change, err error) {
+	if len(renames) == 0 {
+		return nil, nil, fmt.Errorf("ciyaml: at least one tag rename is required")
+	}
+	for _, r := range renames {
+		old := strings.TrimSpace(r.Old)
+		next := strings.TrimSpace(r.New)
+		if old == "" || next == "" {
+			return nil, nil, fmt.Errorf("ciyaml: tag rename old/new must not be empty")
+		}
+		if old == next {
+			return nil, nil, fmt.Errorf("ciyaml: tag rename old and new must differ (got %q)", old)
+		}
+	}
+
+	docs, configDoc, err := decodeGitLabDocuments(content)
+	if err != nil {
+		return nil, nil, err
+	}
+	root, err := rootMapping(configDoc)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	var allChanges []Change
+
+	for _, r := range renames {
+		old := strings.TrimSpace(r.Old)
+		next := strings.TrimSpace(r.New)
+
+		changed, replaceErr := replaceDefaultTag(root, old, next)
+		if replaceErr != nil {
+			return nil, nil, replaceErr
+		}
+		if changed {
+			allChanges = append(allChanges, Change{Kind: ChangeDefaultReplaced, Tag: next, OldTag: old})
+		}
+
+		jobChanges, replaceErr := replaceJobTags(root, old, next)
+		if replaceErr != nil {
+			return nil, nil, replaceErr
 		}
 		allChanges = append(allChanges, jobChanges...)
 	}
@@ -281,6 +365,82 @@ func ensureJobTags(root *yaml.Node, tag string) ([]Change, error) {
 		}
 	}
 	return changes, nil
+}
+
+// replaceDefaultTag replaces oldTag with newTag in root.default.tags, if
+// and only if default.tags currently contains oldTag. Unlike
+// ensureDefaultTag, it never creates a default: block.
+func replaceDefaultTag(root *yaml.Node, oldTag, newTag string) (bool, error) {
+	_, defaultVal, found := findMapEntry(root, "default")
+	if !found {
+		return false, nil
+	}
+	if defaultVal.Kind != yaml.MappingNode {
+		return false, fmt.Errorf("ciyaml: top-level default: is not a mapping - not a valid GitLab CI YAML document")
+	}
+	_, tagsVal, found := findMapEntry(defaultVal, "tags")
+	if !found {
+		return false, nil
+	}
+	if tagsVal.Kind != yaml.SequenceNode {
+		return false, fmt.Errorf("ciyaml: default.tags is not a list - not a valid GitLab CI YAML document")
+	}
+	return replaceInSequence(tagsVal, oldTag, newTag), nil
+}
+
+// replaceJobTags replaces oldTag with newTag in every existing job-level
+// tags: list that currently contains oldTag. A job with no tags: key, or
+// whose tags: list doesn't contain oldTag, is left untouched.
+func replaceJobTags(root *yaml.Node, oldTag, newTag string) ([]Change, error) {
+	var changes []Change
+	for i := 0; i+1 < len(root.Content); i += 2 {
+		keyNode, valNode := root.Content[i], root.Content[i+1]
+		if reservedTopLevelKeys[keyNode.Value] {
+			continue
+		}
+		if valNode.Kind != yaml.MappingNode {
+			continue
+		}
+		_, tagsVal, found := findMapEntry(valNode, "tags")
+		if !found {
+			continue
+		}
+		if tagsVal.Kind != yaml.SequenceNode {
+			return nil, fmt.Errorf("ciyaml: job %q has a non-list tags: value - not a valid GitLab CI YAML document", keyNode.Value)
+		}
+		if replaceInSequence(tagsVal, oldTag, newTag) {
+			changes = append(changes, Change{Kind: ChangeJobReplaced, Job: keyNode.Value, Tag: newTag, OldTag: oldTag})
+		}
+	}
+	return changes, nil
+}
+
+// replaceInSequence removes oldTag from seq (if present) and appends
+// newTag unless it is already present. Reports whether oldTag was found
+// (and therefore anything changed) - a sequence without oldTag is left
+// byte-for-byte untouched.
+func replaceInSequence(seq *yaml.Node, oldTag, newTag string) bool {
+	idx := -1
+	hasNew := false
+	for i, item := range seq.Content {
+		if item.Kind != yaml.ScalarNode {
+			continue
+		}
+		if item.Value == oldTag {
+			idx = i
+		}
+		if item.Value == newTag {
+			hasNew = true
+		}
+	}
+	if idx == -1 {
+		return false
+	}
+	seq.Content = append(seq.Content[:idx], seq.Content[idx+1:]...)
+	if !hasNew {
+		seq.Content = append(seq.Content, &yaml.Node{Kind: yaml.ScalarNode, Value: newTag})
+	}
+	return true
 }
 
 // ensureTagInMapping ensures mapping has a tags: sequence containing tag,

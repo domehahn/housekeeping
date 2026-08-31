@@ -7,6 +7,8 @@ import (
 	"testing"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/domehahn/housekeeping/internal/domain"
 )
 
 // mustParse decodes into a generic map for assertions that don't care
@@ -418,6 +420,180 @@ build-job:
 	patched, _, err := AddTag(content, "k8s-runner")
 	if err != nil {
 		t.Fatalf("AddTag: %v", err)
+	}
+	if !strings.Contains(string(patched), "# This pipeline builds and deploys the service.") {
+		t.Errorf("expected the leading comment to survive patching, got:\n%s", patched)
+	}
+}
+
+func TestReplaceTag_ReplacesInDefaultTags(t *testing.T) {
+	content := []byte("default:\n  tags:\n    - AKS\n    - other-tag\n\nbuild-job:\n  script: [\"echo hi\"]\n")
+
+	patched, changes, err := ReplaceTag(content, "AKS", "aks")
+	if err != nil {
+		t.Fatalf("ReplaceTag: %v", err)
+	}
+	if len(changes) != 1 || changes[0].Kind != ChangeDefaultReplaced || changes[0].OldTag != "AKS" || changes[0].Tag != "aks" {
+		t.Fatalf("expected one default_replaced change AKS->aks, got %+v", changes)
+	}
+
+	m := mustParse(t, patched)
+	got := tagsOf(t, m, "default", "tags")
+	if contains(got, "AKS") {
+		t.Errorf("expected AKS to be removed from default.tags, got %v", got)
+	}
+	if !contains(got, "aks") || !contains(got, "other-tag") {
+		t.Errorf("expected aks and other-tag in default.tags, got %v", got)
+	}
+}
+
+func TestReplaceTag_ReplacesInJobTags(t *testing.T) {
+	content := []byte(`test-job:
+  tags:
+    - AKS
+  script:
+    - echo test
+
+deploy-job:
+  script:
+    - echo deploy
+`)
+	patched, changes, err := ReplaceTag(content, "AKS", "aks")
+	if err != nil {
+		t.Fatalf("ReplaceTag: %v", err)
+	}
+	var jobChange *Change
+	for i := range changes {
+		if changes[i].Kind == ChangeJobReplaced {
+			jobChange = &changes[i]
+		}
+	}
+	if jobChange == nil || jobChange.Job != "test-job" || jobChange.OldTag != "AKS" || jobChange.Tag != "aks" {
+		t.Fatalf("expected a job_replaced change for test-job, got %+v", changes)
+	}
+
+	m := mustParse(t, patched)
+	if got := tagsOf(t, m, "test-job", "tags"); contains(got, "AKS") || !contains(got, "aks") {
+		t.Errorf("expected test-job.tags to have aks and not AKS, got %v", got)
+	}
+	if got := tagsOf(t, m, "deploy-job", "tags"); got != nil {
+		t.Errorf("expected deploy-job to remain untouched (never had tags:), got %v", got)
+	}
+}
+
+func TestReplaceTag_LeavesUntouchedWhatNeverHadOldTag(t *testing.T) {
+	// Unlike AddTag, ReplaceTag must never create a default: block and
+	// must never touch a job's tags: list that never had the old tag.
+	content := []byte(`test-job:
+  tags:
+    - some-other-tag
+  script:
+    - echo test
+`)
+	patched, changes, err := ReplaceTag(content, "AKS", "aks")
+	if err != nil {
+		t.Fatalf("ReplaceTag: %v", err)
+	}
+	if len(changes) != 0 {
+		t.Fatalf("expected no changes, got %+v", changes)
+	}
+	if string(patched) != string(content) {
+		t.Errorf("expected byte-identical output when old tag is absent, got:\n%s", patched)
+	}
+}
+
+func TestReplaceTag_NoOpWhenOldTagAbsentAnywhere(t *testing.T) {
+	content := []byte("default:\n  tags:\n    - aks\n\nbuild-job:\n  script: [\"echo hi\"]\n")
+	patched, changes, err := ReplaceTag(content, "AKS", "aks")
+	if err != nil {
+		t.Fatalf("ReplaceTag: %v", err)
+	}
+	if len(changes) != 0 {
+		t.Fatalf("expected no changes when old tag is already gone, got %+v", changes)
+	}
+	if string(patched) != string(content) {
+		t.Errorf("expected byte-identical output, got:\n%s", patched)
+	}
+}
+
+func TestReplaceTag_CaseSensitivity(t *testing.T) {
+	// The bug this feature fixes: "AKS" and "aks" are distinct GitLab
+	// tags. A document that already has "aks" (lowercase) must not be
+	// seen as already correct when asked to replace "AKS" - and vice
+	// versa, replacing "AKS" with "aks" must not touch an unrelated,
+	// already-lowercase tag.
+	content := []byte("default:\n  tags:\n    - AKS\n    - aks\n\nbuild-job:\n  script: [\"echo hi\"]\n")
+	patched, changes, err := ReplaceTag(content, "AKS", "aks")
+	if err != nil {
+		t.Fatalf("ReplaceTag: %v", err)
+	}
+	if len(changes) != 1 {
+		t.Fatalf("expected exactly one change, got %+v", changes)
+	}
+	m := mustParse(t, patched)
+	got := tagsOf(t, m, "default", "tags")
+	if contains(got, "AKS") {
+		t.Errorf("expected AKS to be removed, got %v", got)
+	}
+	count := 0
+	for _, tag := range got {
+		if tag == "aks" {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Errorf("expected exactly one aks entry (no duplicate), got %v", got)
+	}
+}
+
+func TestReplaceTag_RejectsEqualOldAndNew(t *testing.T) {
+	if _, _, err := ReplaceTag([]byte("default:\n  tags: [aks]\n"), "aks", "aks"); err == nil {
+		t.Fatal("expected an error when old and new tag are identical")
+	}
+}
+
+func TestReplaceTag_RejectsEmptyOldOrNew(t *testing.T) {
+	content := []byte("default:\n  tags: [aks]\n")
+	if _, _, err := ReplaceTag(content, "", "aks"); err == nil {
+		t.Fatal("expected an error for empty old tag")
+	}
+	if _, _, err := ReplaceTag(content, "aks", ""); err == nil {
+		t.Fatal("expected an error for empty new tag")
+	}
+}
+
+func TestReplaceTags_AppliesMultipleRenamesAtomically(t *testing.T) {
+	content := []byte("default:\n  tags:\n    - AKS\n    - EKS\n")
+	patched, changes, err := ReplaceTags(content, []domain.TagRename{
+		{Old: "AKS", New: "aks"},
+		{Old: "EKS", New: "eks"},
+	})
+	if err != nil {
+		t.Fatalf("ReplaceTags: %v", err)
+	}
+	if len(changes) != 2 {
+		t.Fatalf("expected two changes, got %+v", changes)
+	}
+	m := mustParse(t, patched)
+	got := tagsOf(t, m, "default", "tags")
+	if !contains(got, "aks") || !contains(got, "eks") || contains(got, "AKS") || contains(got, "EKS") {
+		t.Errorf("expected both renames applied, got %v", got)
+	}
+}
+
+func TestReplaceTag_PreservesUnrelatedComments(t *testing.T) {
+	content := []byte(`# This pipeline builds and deploys the service.
+default:
+  tags:
+    - AKS
+
+build-job:
+  script:
+    - echo hi
+`)
+	patched, _, err := ReplaceTag(content, "AKS", "aks")
+	if err != nil {
+		t.Fatalf("ReplaceTag: %v", err)
 	}
 	if !strings.Contains(string(patched), "# This pipeline builds and deploys the service.") {
 		t.Errorf("expected the leading comment to survive patching, got:\n%s", patched)

@@ -53,10 +53,12 @@ func (e PipelineTagEvaluation) Matched() bool {
 }
 
 // PipelineTagEvaluationSummary is the full result of evaluating every
-// project discovered in a scope against a desired CI tag.
+// project discovered in a scope against a desired CI tag (or, when
+// Renames is set instead of Tags, a set of tag corrections).
 type PipelineTagEvaluationSummary struct {
 	Scope   domain.Scope
 	Tags    []string
+	Renames []domain.TagRename
 	Results []PipelineTagEvaluation
 }
 
@@ -173,6 +175,97 @@ func evaluatePipelineTagsForProject(
 	return eval
 }
 
+// EvaluatePipelineTagRename checks every project's .gitlab-ci.yml for the
+// old tag(s) that need correcting, using the same bounded-concurrency and
+// protection handling as EvaluatePipelineTags. Status PipelineTagMissing
+// here means "at least one old tag is present and would be replaced";
+// PipelineTagPresent means none of the old tags were found anywhere (the
+// project is already correct, or was never affected).
+func EvaluatePipelineTagRename(
+	ctx context.Context,
+	reader provider.PipelineConfigProposer,
+	projects []domain.Project,
+	renames []domain.TagRename,
+	protection domain.ProjectProtectionRule,
+	workers int,
+) PipelineTagEvaluationSummary {
+	if workers <= 0 {
+		workers = 5
+	}
+	results := make([]PipelineTagEvaluation, len(projects))
+
+	sem := make(chan struct{}, workers)
+	var wg sync.WaitGroup
+	for i, proj := range projects {
+		wg.Add(1)
+		go func(idx int, p domain.Project) {
+			defer wg.Done()
+			select {
+			case sem <- struct{}{}:
+			case <-ctx.Done():
+				results[idx] = PipelineTagEvaluation{Project: p, Status: PipelineTagFetchError, Reasons: []string{"cancelled"}}
+				return
+			}
+			defer func() { <-sem }()
+			results[idx] = evaluatePipelineTagRenameForProject(ctx, reader, p, renames, protection)
+		}(i, proj)
+	}
+	wg.Wait()
+
+	return PipelineTagEvaluationSummary{Renames: append([]domain.TagRename{}, renames...), Results: results}
+}
+
+func evaluatePipelineTagRenameForProject(
+	ctx context.Context,
+	reader provider.PipelineConfigProposer,
+	proj domain.Project,
+	renames []domain.TagRename,
+	protection domain.ProjectProtectionRule,
+) PipelineTagEvaluation {
+	eval := PipelineTagEvaluation{Project: proj}
+
+	if protection != nil {
+		if protected, reason := protection.IsProtected(proj); protected {
+			eval.Protected = true
+			eval.ProtectionReason = reason
+		}
+	}
+
+	content, exists, err := reader.GetPipelineConfig(ctx, proj.ID)
+	if err != nil {
+		eval.Status = PipelineTagFetchError
+		eval.Reasons = []string{fmt.Sprintf("could not fetch .gitlab-ci.yml: %v", err)}
+		return eval
+	}
+	if !exists {
+		eval.Status = PipelineTagNoCIFile
+		eval.Reasons = []string{"project has no .gitlab-ci.yml at its default branch"}
+		return eval
+	}
+
+	eval.HasIncludes = ciyaml.HasIncludes(content)
+
+	_, changes, err := ciyaml.ReplaceTags(content, renames)
+	if err != nil {
+		eval.Status = PipelineTagParseError
+		eval.Reasons = []string{fmt.Sprintf(".gitlab-ci.yml could not be parsed: %v", err)}
+		return eval
+	}
+
+	if len(changes) == 0 {
+		eval.Status = PipelineTagPresent
+		eval.Reasons = []string{"none of the old tags are present in default.tags or any job's own tags"}
+		return eval
+	}
+
+	eval.Status = PipelineTagMissing
+	eval.Reasons = describeChanges(changes)
+	if eval.HasIncludes {
+		eval.Reasons = append(eval.Reasons, "warning: this file has an include: - jobs defined only in included files are not covered")
+	}
+	return eval
+}
+
 // PipelineConfigPresence pairs a project with whether it has a
 // .gitlab-ci.yml, for `pipelines list` - no target tag involved.
 type PipelineConfigPresence struct {
@@ -219,6 +312,10 @@ func describeChanges(changes []ciyaml.Change) []string {
 			reasons = append(reasons, fmt.Sprintf("tag %q missing from default.tags", c.Tag))
 		case ciyaml.ChangeJobAppended:
 			reasons = append(reasons, fmt.Sprintf("tag %q missing from job %q's own tags", c.Tag, c.Job))
+		case ciyaml.ChangeDefaultReplaced:
+			reasons = append(reasons, fmt.Sprintf("tag %q replaced with %q in default.tags", c.OldTag, c.Tag))
+		case ciyaml.ChangeJobReplaced:
+			reasons = append(reasons, fmt.Sprintf("tag %q replaced with %q in job %q's own tags", c.OldTag, c.Tag, c.Job))
 		}
 	}
 	return reasons

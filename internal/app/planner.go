@@ -137,6 +137,73 @@ func BuildRunnerTagPlan(
 	}
 }
 
+// BuildPipelineTagRenamePlan turns matched pipeline-tag-rename evaluations
+// into a domain.Plan of ActionReplacePipelineTag actions.
+func BuildPipelineTagRenamePlan(
+	providerName, instance string,
+	scope domain.Scope,
+	matched []PipelineTagEvaluation,
+	renames []domain.TagRename,
+	clock domain.Clock,
+) domain.Plan {
+	actions := make([]domain.PlannedAction, 0, len(matched))
+	now := clock.Now()
+	for _, m := range matched {
+		actions = append(actions, domain.PlannedAction{
+			ResourceType: domain.ResourceTypePipelineConfig,
+			ResourceID:   m.Project.ID,
+			ResourceName: m.Project.FullPath,
+			TagRenames:   append([]domain.TagRename{}, renames...),
+			Action:       domain.ActionReplacePipelineTag,
+			Reason:       m.Reasons,
+			EvaluatedAt:  now,
+		})
+	}
+	return domain.Plan{
+		Version:   domain.PlanVersion,
+		Provider:  providerName,
+		Instance:  instance,
+		Scope:     toPlanScope(scope),
+		CreatedAt: now,
+		Actions:   actions,
+	}
+}
+
+// BuildRunnerTagRenamePlan turns matched runner-tag-rename evaluations
+// into a domain.Plan of ActionReplaceRunnerTag actions. Scope here is
+// informational only, exactly as in BuildRunnerTagPlan.
+func BuildRunnerTagRenamePlan(
+	providerName, instance string,
+	scope domain.Scope,
+	matched []RunnerTagRenameEvaluation,
+	renames []domain.TagRename,
+	clock domain.Clock,
+) domain.Plan {
+	actions := make([]domain.PlannedAction, 0, len(matched))
+	now := clock.Now()
+	for _, m := range matched {
+		actions = append(actions, domain.PlannedAction{
+			ResourceType:           domain.ResourceTypeRunner,
+			ResourceID:             m.Runner.ID,
+			ResourceName:           m.Runner.Description,
+			TagRenames:             append([]domain.TagRename{}, renames...),
+			Action:                 domain.ActionReplaceRunnerTag,
+			Reason:                 m.Reasons,
+			EvaluatedAt:            now,
+			OutOfScopeProjectCount: m.OutOfScopeProjectCount(),
+			OutOfScopeProjectPaths: m.Runner.OutOfScopeProjectPaths,
+		})
+	}
+	return domain.Plan{
+		Version:   domain.PlanVersion,
+		Provider:  providerName,
+		Instance:  instance,
+		Scope:     toPlanScope(scope),
+		CreatedAt: now,
+		Actions:   actions,
+	}
+}
+
 func toPlanScope(scope domain.Scope) domain.PlanScope {
 	return domain.PlanScope{
 		Type:      scope.Type,
