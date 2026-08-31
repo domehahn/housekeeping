@@ -40,6 +40,10 @@ type fakeExecutor struct {
 	renameMRURL        string
 	renameMRErr        error
 	closedProposalURLs []string
+
+	closeOnlyURLs  []string
+	closeOnlyErr   error
+	closeOnlyCalls map[string][]string // projectID -> oldTags, recording every ClosePipelineTagProposals call
 }
 
 func newFakeExecutor() *fakeExecutor {
@@ -57,6 +61,7 @@ func newFakeExecutor() *fakeExecutor {
 		updatedRunnerTags: map[string][]string{},
 		runners:           map[string]domain.Runner{},
 		renamedMRs:        map[string][]domain.TagRename{},
+		closeOnlyCalls:    map[string][]string{},
 	}
 }
 
@@ -86,6 +91,14 @@ func (f *fakeExecutor) ProposePipelineTagRename(_ context.Context, projectID str
 		url = "https://gitlab.example.com/mr/2"
 	}
 	return url, f.closedProposalURLs, nil
+}
+
+func (f *fakeExecutor) ClosePipelineTagProposals(_ context.Context, projectID string, oldTags []string) ([]string, error) {
+	if f.closeOnlyErr != nil {
+		return nil, f.closeOnlyErr
+	}
+	f.closeOnlyCalls[projectID] = append([]string{}, oldTags...)
+	return f.closeOnlyURLs, nil
 }
 
 func (f *fakeExecutor) GetRunnerTags(_ context.Context, runnerID string) ([]string, error) {
@@ -503,6 +516,82 @@ func TestExecute_ReplacePipelineTag_AlreadyFixedIsIdempotent(t *testing.T) {
 
 	if len(f.renamedMRs) != 0 {
 		t.Errorf("expected no Merge Request when the old tag is no longer present, got %+v", f.renamedMRs)
+	}
+	if summary.Outcomes[0].Result != domain.ResultSkippedAlreadyDone {
+		t.Errorf("expected ResultSkippedAlreadyDone, got %v: %s", summary.Outcomes[0].Result, summary.Outcomes[0].Detail)
+	}
+}
+
+func TestExecute_ReplacePipelineTag_AddsCorrectedTagWhenNeverMerged(t *testing.T) {
+	// The original add-tag Merge Request for this project was never
+	// merged: the file has neither "AKS" nor "aks" at all. The rename
+	// must still add the corrected tag.
+	f := newFakeExecutor()
+	f.projects["1"] = domain.Project{ID: "1"}
+	f.ciFiles["1"] = []byte("build-job:\n  script: [\"echo hi\"]\n")
+	f.renameMRURL = "https://gitlab.example.com/group/proj/-/merge_requests/43"
+
+	p := domain.Plan{Actions: []domain.PlannedAction{
+		{ResourceType: domain.ResourceTypePipelineConfig, ResourceID: "1", Action: domain.ActionReplacePipelineTag,
+			TagRenames: []domain.TagRename{{Old: "AKS", New: "aks"}}, EvaluatedAt: time.Now()},
+	}}
+	summary := Execute(context.Background(), f, p, ExecuteOptions{Apply: true, Revalidate: true})
+
+	if len(f.renamedMRs) != 1 {
+		t.Fatalf("expected a Merge Request adding the corrected tag, got %+v", f.renamedMRs)
+	}
+	if summary.Outcomes[0].Result != domain.ResultSuccess {
+		t.Fatalf("expected ResultSuccess, got %v: %s", summary.Outcomes[0].Result, summary.Outcomes[0].Detail)
+	}
+}
+
+func TestExecute_ReplacePipelineTag_ClosesStaleProposalWithoutFileChange(t *testing.T) {
+	// The file is already fully correct (or never needed merging), but a
+	// stale, still-open Merge Request from an earlier, wrong-tag run
+	// remains open - this is the exact case reported in production:
+	// evaluate/plan flagged it, and execute must close it even though
+	// there is no file diff to propose.
+	f := newFakeExecutor()
+	f.projects["1"] = domain.Project{ID: "1"}
+	f.ciFiles["1"] = []byte("default:\n  tags:\n    - aks\n")
+	f.closeOnlyURLs = []string{"https://gitlab.example.com/group/proj/-/merge_requests/7"}
+
+	p := domain.Plan{Actions: []domain.PlannedAction{
+		{ResourceType: domain.ResourceTypePipelineConfig, ResourceID: "1", Action: domain.ActionReplacePipelineTag,
+			TagRenames: []domain.TagRename{{Old: "AKS", New: "aks"}}, EvaluatedAt: time.Now()},
+	}}
+	summary := Execute(context.Background(), f, p, ExecuteOptions{Apply: true, Revalidate: true})
+
+	if !slices.Equal(f.closeOnlyCalls["1"], []string{"AKS"}) {
+		t.Errorf("expected ClosePipelineTagProposals to be called for the old tag, got %+v", f.closeOnlyCalls)
+	}
+	if len(f.renamedMRs) != 0 {
+		t.Errorf("expected no new Merge Request when the file needs no change, got %+v", f.renamedMRs)
+	}
+	if summary.Outcomes[0].Result != domain.ResultSuccess {
+		t.Fatalf("expected ResultSuccess, got %v: %s", summary.Outcomes[0].Result, summary.Outcomes[0].Detail)
+	}
+	if !strings.Contains(summary.Outcomes[0].Detail, "merge_requests/7") {
+		t.Errorf("expected the outcome detail to name the closed proposal, got %q", summary.Outcomes[0].Detail)
+	}
+}
+
+func TestExecute_ReplacePipelineTag_TrulyNothingToDoIsIdempotent(t *testing.T) {
+	f := newFakeExecutor()
+	f.projects["1"] = domain.Project{ID: "1"}
+	f.ciFiles["1"] = []byte("default:\n  tags:\n    - aks\n") // already correct, no stale proposal either
+
+	p := domain.Plan{Actions: []domain.PlannedAction{
+		{ResourceType: domain.ResourceTypePipelineConfig, ResourceID: "1", Action: domain.ActionReplacePipelineTag,
+			TagRenames: []domain.TagRename{{Old: "AKS", New: "aks"}}, EvaluatedAt: time.Now()},
+	}}
+	summary := Execute(context.Background(), f, p, ExecuteOptions{Apply: true, Revalidate: true})
+
+	// A close attempt is made (harmlessly finding nothing to close), but
+	// no Merge Request is opened and the outcome is a clean idempotent
+	// no-op.
+	if len(f.renamedMRs) != 0 {
+		t.Errorf("expected no Merge Request, got %+v", f.renamedMRs)
 	}
 	if summary.Outcomes[0].Result != domain.ResultSkippedAlreadyDone {
 		t.Errorf("expected ResultSkippedAlreadyDone, got %v: %s", summary.Outcomes[0].Result, summary.Outcomes[0].Detail)

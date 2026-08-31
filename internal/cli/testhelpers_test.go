@@ -55,6 +55,9 @@ type fakeClient struct {
 	renameErr          error
 	closedProposalURLs []string
 	renamedTags        map[string][]domain.TagRename
+	closeOnlyURLs      []string
+	closeOnlyErr       error
+	closeOnlyCalls     map[string][]string
 
 	runners    []domain.Runner
 	runnersErr error
@@ -75,6 +78,7 @@ func newFakeClient() *fakeClient {
 		ciIncludes:      map[string][]domain.PipelineInclude{},
 		proposals:       map[string][]domain.PipelineProposal{},
 		renamedTags:     map[string][]domain.TagRename{},
+		closeOnlyCalls:  map[string][]string{},
 		runnerTags:      map[string][]string{},
 		deletedProjects: map[string]bool{},
 		removedMembers:  map[string]bool{},
@@ -152,6 +156,13 @@ func (f *fakeClient) ProposePipelineTagRename(_ context.Context, projectID strin
 	}
 	f.renamedTags[projectID] = append([]domain.TagRename{}, renames...)
 	return f.renameURL, f.closedProposalURLs, nil
+}
+func (f *fakeClient) ClosePipelineTagProposals(_ context.Context, projectID string, oldTags []string) ([]string, error) {
+	if f.closeOnlyErr != nil {
+		return nil, f.closeOnlyErr
+	}
+	f.closeOnlyCalls[projectID] = append([]string{}, oldTags...)
+	return f.closeOnlyURLs, nil
 }
 func (f *fakeClient) GetMergedPipelineConfig(_ context.Context, projectID string) ([]byte, []domain.PipelineInclude, error) {
 	return f.mergedCI[projectID], f.ciIncludes[projectID], nil
