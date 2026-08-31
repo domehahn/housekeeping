@@ -370,9 +370,15 @@ func performRunnerTagAction(ctx context.Context, client Executor, planScope doma
 
 // performPipelineTagRenameAction re-fetches the project's .gitlab-ci.yml
 // fresh and re-runs the replace patch - exactly the same live-refetch-as-
-// revalidation pattern as performPipelineTagAction. On success, the
-// returned detail names the new Merge Request and any old, superseded
-// proposal(s) that were closed alongside it.
+// revalidation pattern as performPipelineTagAction. If none of the old
+// tags are present in the file, it also checks whether the corrected tag
+// was ever actually added (a rename has nothing to replace when the
+// original add-tag Merge Request for this project was never merged) and,
+// failing that, whether a stale open proposal for an old tag still needs
+// closing on its own - covering the case where the file is already fully
+// correct but a wrong-tag Merge Request from an earlier run remains open.
+// On success, the returned detail names the new Merge Request (if any)
+// and any old, superseded proposal(s) that were closed alongside it.
 func performPipelineTagRenameAction(ctx context.Context, client Executor, action domain.PlannedAction) (string, error) {
 	content, exists, err := client.GetPipelineConfig(ctx, action.ResourceID)
 	if err != nil {
@@ -387,10 +393,25 @@ func performPipelineTagRenameAction(ctx context.Context, client Executor, action
 		return "", fmt.Errorf("patch .gitlab-ci.yml: %w", err)
 	}
 	if len(changes) == 0 {
-		// None of the old tags are present anymore - already fixed by a
-		// previous run's merged Merge Request, or by a human. Idempotent
-		// no-op.
-		return "", provider.NewError(provider.KindNotFound, "replace pipeline tag", "none of the old tags are present anymore", nil)
+		// None of the old tags are present in the file. The corrected tag
+		// may still need adding (the original add-tag proposal for this
+		// project was never merged).
+		if addPatched, addChanges, addErr := ciyaml.AddTags(content, newTagsOf(action.TagRenames)); addErr == nil && len(addChanges) > 0 {
+			patched, changes = addPatched, addChanges
+		}
+	}
+
+	if len(changes) == 0 {
+		// The file is already fully correct. The only thing potentially
+		// left to do is close a stale, still-open Merge Request from an
+		// earlier, wrong-tag run - it never got merged, so the file never
+		// picked up the mistake, but the wrong proposal itself is still
+		// open and misleading.
+		closed, closeErr := client.ClosePipelineTagProposals(ctx, action.ResourceID, oldTagsOf(action.TagRenames))
+		if closeErr == nil && len(closed) > 0 {
+			return fmt.Sprintf("no file change needed; closed superseded proposal(s): %v", closed), nil
+		}
+		return "", provider.NewError(provider.KindNotFound, "replace pipeline tag", "none of the old tags are present anymore and no stale proposal to close", nil)
 	}
 
 	url, closed, err := client.ProposePipelineTagRename(ctx, action.ResourceID, patched, action.TagRenames)

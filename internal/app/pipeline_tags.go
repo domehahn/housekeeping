@@ -175,15 +175,29 @@ func evaluatePipelineTagsForProject(
 	return eval
 }
 
+// PipelineTagRenameReader is what EvaluatePipelineTagRename needs: reading
+// .gitlab-ci.yml plus listing existing scm-cleaner proposals. The second
+// capability matters because a project's .gitlab-ci.yml may already be
+// fully correct (or never had the old tag merged in the first place)
+// while a stale, still-open Merge Request from an earlier, wrong-tag run
+// remains open - that project must still be reported as matched so
+// execution closes the stale proposal, even though the file itself needs
+// no change.
+type PipelineTagRenameReader interface {
+	provider.PipelineConfigProposer
+	provider.PipelineProposalReporter
+}
+
 // EvaluatePipelineTagRename checks every project's .gitlab-ci.yml for the
 // old tag(s) that need correcting, using the same bounded-concurrency and
 // protection handling as EvaluatePipelineTags. Status PipelineTagMissing
-// here means "at least one old tag is present and would be replaced";
-// PipelineTagPresent means none of the old tags were found anywhere (the
-// project is already correct, or was never affected).
+// here means "at least one old tag is present and would be replaced, the
+// corrected tag still needs adding, or a stale open proposal for an old
+// tag needs closing"; PipelineTagPresent means none of that applies - the
+// project is already fully correct with no leftover artifact.
 func EvaluatePipelineTagRename(
 	ctx context.Context,
-	reader provider.PipelineConfigProposer,
+	reader PipelineTagRenameReader,
 	projects []domain.Project,
 	renames []domain.TagRename,
 	protection domain.ProjectProtectionRule,
@@ -217,7 +231,7 @@ func EvaluatePipelineTagRename(
 
 func evaluatePipelineTagRenameForProject(
 	ctx context.Context,
-	reader provider.PipelineConfigProposer,
+	reader PipelineTagRenameReader,
 	proj domain.Project,
 	renames []domain.TagRename,
 	protection domain.ProjectProtectionRule,
@@ -252,18 +266,82 @@ func evaluatePipelineTagRenameForProject(
 		return eval
 	}
 
-	if len(changes) == 0 {
-		eval.Status = PipelineTagPresent
-		eval.Reasons = []string{"none of the old tags are present in default.tags or any job's own tags"}
+	if len(changes) > 0 {
+		eval.Status = PipelineTagMissing
+		eval.Reasons = describeChanges(changes)
+		if eval.HasIncludes {
+			eval.Reasons = append(eval.Reasons, "warning: this file has an include: - jobs defined only in included files are not covered")
+		}
 		return eval
 	}
 
-	eval.Status = PipelineTagMissing
-	eval.Reasons = describeChanges(changes)
-	if eval.HasIncludes {
-		eval.Reasons = append(eval.Reasons, "warning: this file has an include: - jobs defined only in included files are not covered")
+	// None of the old tags are present in the file. Two further cases can
+	// still require action: the corrected tag was never added at all
+	// (e.g. the original add-tag Merge Request for this project was
+	// never merged), or the file is already fully correct but a stale,
+	// still-open proposal for an old tag remains and needs closing.
+	_, addChanges, addErr := ciyaml.AddTags(content, newTagsOf(renames))
+	if addErr == nil && len(addChanges) > 0 {
+		eval.Status = PipelineTagMissing
+		eval.Reasons = describeChanges(addChanges)
+		eval.Reasons = append(eval.Reasons, "the corrected tag was never added to this file (the original proposal may be unmerged or missing)")
+		if eval.HasIncludes {
+			eval.Reasons = append(eval.Reasons, "warning: this file has an include: - jobs defined only in included files are not covered")
+		}
+		return eval
 	}
+
+	if staleProposal, ok := findStaleOpenTagProposal(ctx, reader, proj.ID, oldTagsOf(renames)); ok {
+		eval.Status = PipelineTagMissing
+		eval.Reasons = []string{fmt.Sprintf("an open Merge Request (%s) still proposes an old tag and would be closed as part of this correction", staleProposal)}
+		return eval
+	}
+
+	eval.Status = PipelineTagPresent
+	eval.Reasons = []string{"none of the old tags are present in default.tags or any job's own tags, and no stale proposal exists"}
 	return eval
+}
+
+// findStaleOpenTagProposal reports the URL of the first still-open
+// scm-cleaner proposal found for any of oldTags. A lookup failure for one
+// old tag is skipped rather than propagated - this is advisory
+// information for evaluate/plan; the actual close attempt at execute time
+// is what matters for correctness, and it is independently best-effort.
+func findStaleOpenTagProposal(ctx context.Context, reader provider.PipelineProposalReporter, projectID string, oldTags []string) (string, bool) {
+	for _, tag := range oldTags {
+		proposals, err := reader.ListPipelineTagProposals(ctx, projectID, []string{tag})
+		if err != nil {
+			continue
+		}
+		for _, p := range proposals {
+			if p.State == "opened" {
+				return p.URL, true
+			}
+		}
+	}
+	return "", false
+}
+
+// newTagsOf and oldTagsOf extract the deduplicated New/Old halves of a set
+// of tag renames, preserving first-seen order. Shared between evaluation
+// and execution (internal/app/executor.go).
+func newTagsOf(renames []domain.TagRename) []string { return tagRenameHalves(renames, false) }
+func oldTagsOf(renames []domain.TagRename) []string { return tagRenameHalves(renames, true) }
+
+func tagRenameHalves(renames []domain.TagRename, old bool) []string {
+	seen := make(map[string]bool, len(renames))
+	out := make([]string, 0, len(renames))
+	for _, r := range renames {
+		v := r.New
+		if old {
+			v = r.Old
+		}
+		if !seen[v] {
+			seen[v] = true
+			out = append(out, v)
+		}
+	}
+	return out
 }
 
 // PipelineConfigPresence pairs a project with whether it has a

@@ -97,6 +97,21 @@ operator never intended to touch.
   a failure to close is never fatal to the rename itself - the corrected
   MR still opens, and the caller is told which old proposal(s), if any,
   could not be closed.
+- Because `GetPipelineConfig` reads only the **default branch**, a wrong
+  tag that only ever reached an open, unmerged Merge Request (never the
+  default branch itself) would otherwise be invisible to `ReplaceTags`,
+  which has nothing to replace in a file that never had the mistake.
+  `EvaluatePipelineTagRename`/`performPipelineTagRenameAction` therefore
+  check two further conditions when the file itself needs no replace: (1)
+  whether the corrected tag was ever actually added at all (the original
+  add-tag proposal for that project may simply be unmerged - handled by
+  falling back to the same `ciyaml.AddTags` semantics `pipelines plan
+  --tag` uses), and (2) whether a stale, still-open proposal for an old
+  tag remains even though the file is already fully correct - handled by
+  `provider.ClosePipelineTagProposals`, a close-only counterpart to
+  `ProposePipelineTagRename` that never touches the file or opens a new
+  proposal, reusing the identical marker-scoped, `opened`-only, best-effort
+  guarantees.
 
 **Runner tags (`runners` command):**
 

@@ -128,7 +128,7 @@ func (a *Adapter) ProposePipelineTagRename(ctx context.Context, projectID string
 		return "", nil, err
 	}
 
-	closedURLs := a.closeSupersededProposals(ctx, projectID, renames)
+	closedURLs := a.closeStaleTagProposals(ctx, projectID, oldTagsOf(renames))
 
 	if url, ok, err := a.findOpenProposal(ctx, projectID, branchName, proj.DefaultBranch); err != nil || ok {
 		return url, closedURLs, err
@@ -163,19 +163,28 @@ func (a *Adapter) ProposePipelineTagRename(ctx context.Context, projectID string
 	return mr.WebURL, closedURLs, nil
 }
 
-// closeSupersededProposals looks up, for every rename's old tag, any
-// still-open scm-cleaner proposal that proposed exactly that old tag
-// (via ListPipelineTagProposals' existing cryptographic tag-set marker
-// match, so only scm-cleaner's own matching proposals are ever touched)
-// and closes it. This is entirely best-effort: a lookup or close failure
-// is silently skipped rather than propagated, since failing to tidy up an
-// old, now-superseded proposal must never block or fail the actual
-// rename. Callers surface only what was actually closed.
-func (a *Adapter) closeSupersededProposals(ctx context.Context, projectID string, renames []domain.TagRename) []string {
+// ClosePipelineTagProposals best-effort closes every still-open
+// scm-cleaner proposal for any of oldTags, without touching
+// .gitlab-ci.yml or opening any new proposal - see the provider.Client
+// doc comment for why this exists (a stale, still-open proposal from an
+// earlier, wrong-tag run when the file itself needs no change).
+func (a *Adapter) ClosePipelineTagProposals(ctx context.Context, projectID string, oldTags []string) ([]string, error) {
+	return a.closeStaleTagProposals(ctx, projectID, oldTags), nil
+}
+
+// closeStaleTagProposals looks up, for every old tag, any still-open
+// scm-cleaner proposal that proposed exactly that old tag (via
+// ListPipelineTagProposals' existing cryptographic tag-set marker match,
+// so only scm-cleaner's own matching proposals are ever touched) and
+// closes it. This is entirely best-effort: a lookup or close failure is
+// silently skipped rather than propagated, since failing to tidy up an
+// old, now-superseded proposal must never block or fail the actual fix.
+// Callers surface only what was actually closed.
+func (a *Adapter) closeStaleTagProposals(ctx context.Context, projectID string, oldTags []string) []string {
 	var closedURLs []string
 	seen := make(map[string]bool)
-	for _, r := range renames {
-		proposals, err := a.ListPipelineTagProposals(ctx, projectID, []string{r.Old})
+	for _, old := range oldTags {
+		proposals, err := a.ListPipelineTagProposals(ctx, projectID, []string{old})
 		if err != nil {
 			continue
 		}
@@ -193,6 +202,18 @@ func (a *Adapter) closeSupersededProposals(ctx context.Context, projectID string
 		}
 	}
 	return closedURLs
+}
+
+func oldTagsOf(renames []domain.TagRename) []string {
+	seen := make(map[string]bool, len(renames))
+	out := make([]string, 0, len(renames))
+	for _, r := range renames {
+		if !seen[r.Old] {
+			seen[r.Old] = true
+			out = append(out, r.Old)
+		}
+	}
+	return out
 }
 
 func renameBranchName(renames []domain.TagRename, content []byte) string {

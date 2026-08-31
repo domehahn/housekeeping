@@ -608,6 +608,16 @@ corrected Merge Request from opening. See
 [threat model §13](docs/threat-model.md#13-automatically-closing-a-stale-scm-cleaner-proposal)
 for the full guarantee.
 
+`evaluate`/`plan` read `.gitlab-ci.yml` at the **default branch**, so a
+project is still correctly flagged even when the file itself needs no
+change: if the corrected tag was never actually added (the original
+add-tag Merge Request for that project is still open, unmerged) it is
+added now, and if the file is already fully correct but a stale, unmerged
+Merge Request from an earlier, wrong-tag run is still open, that project
+is still matched purely so `execute` can close it - a wrong tag that only
+ever reached an open Merge Request, never the default branch, is not
+missed.
+
 ```bash
 # Evaluate which projects still have the wrong tag:
 scm-cleaner pipelines evaluate \
