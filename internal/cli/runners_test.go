@@ -1,9 +1,11 @@
 package cli
 
 import (
+	"slices"
 	"strings"
 	"testing"
 
+	"github.com/domehahn/housekeeping/internal/app"
 	"github.com/domehahn/housekeeping/internal/domain"
 )
 
@@ -49,6 +51,70 @@ func TestRunnersList_ShowsRunners(t *testing.T) {
 	}
 	if !strings.Contains(stdout, "shared-runner") {
 		t.Errorf("expected the runner to be listed, got:\n%s", stdout)
+	}
+}
+
+func TestRunnersEvaluate_TagAndReplaceTagAreMutuallyExclusive(t *testing.T) {
+	e := withGroup(testEnv(newFakeClient()), "company", false)
+	_, _, err := runCmd(newRunnersCmd(e), []string{"evaluate", "--tag", "AKS", "--replace-tag", "AKS:aks"})
+	if err == nil {
+		t.Fatal("expected an error when --tag and --replace-tag are both set")
+	}
+	if got := exitCodeOf(err); got != ExitInvalidConfiguration {
+		t.Errorf("exit code = %d, want %d", got, ExitInvalidConfiguration)
+	}
+}
+
+func TestRunnersEvaluate_RejectsMalformedReplaceTag(t *testing.T) {
+	e := withGroup(testEnv(newFakeClient()), "company", false)
+	_, _, err := runCmd(newRunnersCmd(e), []string{"evaluate", "--replace-tag", "AKS"})
+	if err == nil {
+		t.Fatal("expected an error for a --replace-tag value without a colon")
+	}
+	if got := exitCodeOf(err); got != ExitInvalidConfiguration {
+		t.Errorf("exit code = %d, want %d", got, ExitInvalidConfiguration)
+	}
+}
+
+func TestRunnersEvaluate_MatchesOldTagForReplace(t *testing.T) {
+	c := newFakeClient()
+	c.scope = domain.Scope{ID: "1", Path: "company"}
+	c.projects = []domain.Project{{ID: "1", FullPath: "company/a"}}
+	c.runners = []domain.Runner{{ID: "500", Description: "shared-runner", ImpactKnown: true, TagList: []string{"AKS"}}}
+	e := withGroup(testEnv(c), "company", false)
+
+	stdout, _, err := runCmd(newRunnersCmd(e), []string{"evaluate", "--replace-tag", "AKS:aks"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(stdout, "shared-runner") {
+		t.Errorf("expected the runner with the old tag to be reported as matched, got:\n%s", stdout)
+	}
+}
+
+func TestRunnersPlan_WritesReplaceTagPlanFile(t *testing.T) {
+	c := newFakeClient()
+	c.scope = domain.Scope{ID: "1", Path: "company"}
+	c.projects = []domain.Project{{ID: "1", FullPath: "company/a"}}
+	c.runners = []domain.Runner{{ID: "500", Description: "shared-runner", ImpactKnown: true, TagList: []string{"AKS"}}}
+	c.info = fakeInfo()
+	e := withGroup(testEnv(c), "company", false)
+
+	planPath := t.TempDir() + "/rename-plan.json"
+	stdout, _, err := runCmd(newRunnersCmd(e), []string{"plan", "--replace-tag", "AKS:aks", "--output-plan", planPath})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(stdout, "Plan written to") {
+		t.Errorf("expected confirmation that the plan was written, got:\n%s", stdout)
+	}
+	plan, err := app.LoadPlan(planPath)
+	if err != nil {
+		t.Fatalf("load plan: %v", err)
+	}
+	if len(plan.Actions) != 1 || plan.Actions[0].Action != domain.ActionReplaceRunnerTag ||
+		!slices.Equal(plan.Actions[0].TagRenames, []domain.TagRename{{Old: "AKS", New: "aks"}}) {
+		t.Fatalf("unexpected plan actions: %+v", plan.Actions)
 	}
 }
 

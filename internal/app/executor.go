@@ -284,6 +284,10 @@ func performAction(ctx context.Context, client Executor, scope domain.PlanScope,
 		return performPipelineTagAction(ctx, client, action)
 	case domain.ActionAddRunnerTag:
 		return "", performRunnerTagAction(ctx, client, scope, action)
+	case domain.ActionReplacePipelineTag:
+		return performPipelineTagRenameAction(ctx, client, action)
+	case domain.ActionReplaceRunnerTag:
+		return "", performRunnerTagRenameAction(ctx, client, scope, action)
 	default:
 		return "", fmt.Errorf("unsupported action type %q", action.Action)
 	}
@@ -362,6 +366,120 @@ func performRunnerTagAction(ctx context.Context, client Executor, planScope doma
 		return provider.NewError(provider.KindNotFound, "add runner tag", "tags already present", nil)
 	}
 	return client.UpdateRunnerTags(ctx, action.ResourceID, current, append(append([]string{}, current...), missing...))
+}
+
+// performPipelineTagRenameAction re-fetches the project's .gitlab-ci.yml
+// fresh and re-runs the replace patch - exactly the same live-refetch-as-
+// revalidation pattern as performPipelineTagAction. On success, the
+// returned detail names the new Merge Request and any old, superseded
+// proposal(s) that were closed alongside it.
+func performPipelineTagRenameAction(ctx context.Context, client Executor, action domain.PlannedAction) (string, error) {
+	content, exists, err := client.GetPipelineConfig(ctx, action.ResourceID)
+	if err != nil {
+		return "", fmt.Errorf("fetch current .gitlab-ci.yml: %w", err)
+	}
+	if !exists {
+		return "", provider.NewError(provider.KindNotFound, "replace pipeline tag", ".gitlab-ci.yml no longer exists", nil)
+	}
+
+	patched, changes, err := ciyaml.ReplaceTags(content, action.TagRenames)
+	if err != nil {
+		return "", fmt.Errorf("patch .gitlab-ci.yml: %w", err)
+	}
+	if len(changes) == 0 {
+		// None of the old tags are present anymore - already fixed by a
+		// previous run's merged Merge Request, or by a human. Idempotent
+		// no-op.
+		return "", provider.NewError(provider.KindNotFound, "replace pipeline tag", "none of the old tags are present anymore", nil)
+	}
+
+	url, closed, err := client.ProposePipelineTagRename(ctx, action.ResourceID, patched, action.TagRenames)
+	if err != nil {
+		return "", err
+	}
+	detail := "merge request opened: " + url
+	if len(closed) > 0 {
+		detail += fmt.Sprintf("; closed superseded proposal(s): %v", closed)
+	}
+	return detail, nil
+}
+
+// performRunnerTagRenameAction mirrors performRunnerTagAction exactly (the
+// same re-resolve-scope, re-check-impact, out-of-scope-conflict guard) but
+// computes the desired tag list as "remove every old tag present, add
+// every new tag not already present" instead of a plain union.
+func performRunnerTagRenameAction(ctx context.Context, client Executor, planScope domain.PlanScope, action domain.PlannedAction) error {
+	scope, _, err := client.ResolveGroupScope(ctx, planScope.Path, planScope.Recursive)
+	if err != nil {
+		return fmt.Errorf("re-resolve runner scope: %w", err)
+	}
+	projects, err := client.ListProjects(ctx, scope)
+	if err != nil {
+		return fmt.Errorf("re-discover projects for runner scope: %w", err)
+	}
+	projectIDs := make([]string, len(projects))
+	for i, p := range projects {
+		projectIDs[i] = p.ID
+	}
+	live, err := client.GetRunnerForProjects(ctx, action.ResourceID, scope, projectIDs)
+	if err != nil {
+		return fmt.Errorf("re-check runner impact: %w", err)
+	}
+	if !live.ImpactKnown {
+		return provider.NewError(provider.KindConflict, "re-check runner impact", live.ImpactReason, nil)
+	}
+	if !sameStrings(live.OutOfScopeProjectPaths, action.OutOfScopeProjectPaths) {
+		return provider.NewError(provider.KindConflict, "re-check runner impact",
+			"runner project scope changed since planning; create and confirm a new plan", nil)
+	}
+
+	current, err := client.GetRunnerTags(ctx, action.ResourceID)
+	if err != nil {
+		return fmt.Errorf("fetch current runner tags: %w", err)
+	}
+	desired, changed := applyTagRenames(current, action.TagRenames)
+	if !changed {
+		return provider.NewError(provider.KindNotFound, "replace runner tag", "none of the old tags are present anymore", nil)
+	}
+	return client.UpdateRunnerTags(ctx, action.ResourceID, current, desired)
+}
+
+// applyTagRenames computes the tag list that results from applying every
+// rename whose Old tag is actually present in current: removing Old and
+// adding New if not already present. A rename whose Old tag is absent is
+// left entirely alone (mirrors ciyaml.ReplaceTags' "only touch what had
+// the old tag" contract), so this never spuriously adds a New tag whose
+// Old counterpart was never there.
+func applyTagRenames(current []string, renames []domain.TagRename) (desired []string, changed bool) {
+	present := make(map[string]bool, len(current))
+	for _, tag := range current {
+		present[tag] = true
+	}
+	desired = append([]string{}, current...)
+	for _, r := range renames {
+		if !present[r.Old] {
+			continue
+		}
+		changed = true
+		out := desired[:0:0]
+		for _, tag := range desired {
+			if tag != r.Old {
+				out = append(out, tag)
+			}
+		}
+		desired = out
+		hasNew := false
+		for _, tag := range desired {
+			if tag == r.New {
+				hasNew = true
+				break
+			}
+		}
+		if !hasNew {
+			desired = append(desired, r.New)
+		}
+	}
+	return desired, changed
 }
 
 func missingTags(current, desired []string) []string {

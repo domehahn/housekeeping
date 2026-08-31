@@ -19,15 +19,25 @@ const (
 type ActionType string
 
 const (
-	ActionReport            ActionType = "report"
-	ActionDeleteProject     ActionType = "delete-project"
-	ActionArchiveProject    ActionType = "archive-project"
-	ActionRemoveGroupMember ActionType = "remove-from-group"
-	ActionBlockUser         ActionType = "block"
-	ActionDeleteUser        ActionType = "delete-user"
-	ActionAddPipelineTag    ActionType = "add-pipeline-tag"
-	ActionAddRunnerTag      ActionType = "add-runner-tag"
+	ActionReport             ActionType = "report"
+	ActionDeleteProject      ActionType = "delete-project"
+	ActionArchiveProject     ActionType = "archive-project"
+	ActionRemoveGroupMember  ActionType = "remove-from-group"
+	ActionBlockUser          ActionType = "block"
+	ActionDeleteUser         ActionType = "delete-user"
+	ActionAddPipelineTag     ActionType = "add-pipeline-tag"
+	ActionAddRunnerTag       ActionType = "add-runner-tag"
+	ActionReplacePipelineTag ActionType = "replace-pipeline-tag"
+	ActionReplaceRunnerTag   ActionType = "replace-runner-tag"
 )
+
+// TagRename is a single old-tag-to-new-tag correction, e.g. fixing a
+// case-typo like "AKS" -> "aks". Used by ActionReplacePipelineTag and
+// ActionReplaceRunnerTag actions.
+type TagRename struct {
+	Old string `json:"old"`
+	New string `json:"new"`
+}
 
 // PlannedAction is a single, concrete, resource-identified operation that
 // execution may later carry out. It always carries a stable resource ID
@@ -52,6 +62,9 @@ type PlannedAction struct {
 	TagValue string `json:"tagValue,omitempty"`
 	// TagValues contains all tags added atomically by a version-3 tag action.
 	TagValues []string `json:"tagValues,omitempty"`
+	// TagRenames contains the old->new tag corrections applied atomically
+	// by an ActionReplacePipelineTag or ActionReplaceRunnerTag action.
+	TagRenames []TagRename `json:"tagRenames,omitempty"`
 	// OutOfScopeProjectCount is set only for ActionAddRunnerTag: the
 	// number of projects using that runner outside the evaluated scope
 	// (0 for a non-shared runner, or one only used within scope). This

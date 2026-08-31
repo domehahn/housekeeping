@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -34,6 +35,11 @@ type fakeExecutor struct {
 	runnerTags        map[string][]string // runnerID -> current tags
 	updatedRunnerTags map[string][]string
 	runners           map[string]domain.Runner
+
+	renamedMRs         map[string][]domain.TagRename // projectID -> renames, recording every ProposePipelineTagRename call
+	renameMRURL        string
+	renameMRErr        error
+	closedProposalURLs []string
 }
 
 func newFakeExecutor() *fakeExecutor {
@@ -50,6 +56,7 @@ func newFakeExecutor() *fakeExecutor {
 		runnerTags:        map[string][]string{},
 		updatedRunnerTags: map[string][]string{},
 		runners:           map[string]domain.Runner{},
+		renamedMRs:        map[string][]domain.TagRename{},
 	}
 }
 
@@ -67,6 +74,18 @@ func (f *fakeExecutor) ProposePipelineTagChange(_ context.Context, projectID str
 		return f.proposeMRURL, nil
 	}
 	return "https://gitlab.example.com/mr/1", nil
+}
+
+func (f *fakeExecutor) ProposePipelineTagRename(_ context.Context, projectID string, _ []byte, renames []domain.TagRename) (string, []string, error) {
+	if f.renameMRErr != nil {
+		return "", nil, f.renameMRErr
+	}
+	f.renamedMRs[projectID] = append([]domain.TagRename{}, renames...)
+	url := f.renameMRURL
+	if url == "" {
+		url = "https://gitlab.example.com/mr/2"
+	}
+	return url, f.closedProposalURLs, nil
 }
 
 func (f *fakeExecutor) GetRunnerTags(_ context.Context, runnerID string) ([]string, error) {
@@ -444,6 +463,108 @@ func TestExecute_AddRunnerTag_AlreadyPresentIsIdempotent(t *testing.T) {
 	}
 	if summary.Outcomes[0].Result != domain.ResultSkippedAlreadyDone {
 		t.Errorf("expected ResultSkippedAlreadyDone, got %v: %s", summary.Outcomes[0].Result, summary.Outcomes[0].Detail)
+	}
+}
+
+func TestExecute_ReplacePipelineTag_OpensMergeRequestAndReportsClosedProposals(t *testing.T) {
+	f := newFakeExecutor()
+	f.projects["1"] = domain.Project{ID: "1"}
+	f.ciFiles["1"] = []byte("default:\n  tags:\n    - AKS\n")
+	f.renameMRURL = "https://gitlab.example.com/group/proj/-/merge_requests/43"
+	f.closedProposalURLs = []string{"https://gitlab.example.com/group/proj/-/merge_requests/7"}
+
+	p := domain.Plan{Actions: []domain.PlannedAction{
+		{ResourceType: domain.ResourceTypePipelineConfig, ResourceID: "1", Action: domain.ActionReplacePipelineTag,
+			TagRenames: []domain.TagRename{{Old: "AKS", New: "aks"}}, EvaluatedAt: time.Now()},
+	}}
+	summary := Execute(context.Background(), f, p, ExecuteOptions{Apply: true, Revalidate: true})
+
+	if !slices.Equal(f.renamedMRs["1"], []domain.TagRename{{Old: "AKS", New: "aks"}}) {
+		t.Errorf("expected one rename Merge Request for AKS->aks, got %+v", f.renamedMRs)
+	}
+	if summary.Outcomes[0].Result != domain.ResultSuccess {
+		t.Fatalf("expected ResultSuccess, got %v: %s", summary.Outcomes[0].Result, summary.Outcomes[0].Detail)
+	}
+	if !strings.Contains(summary.Outcomes[0].Detail, "merge_requests/43") || !strings.Contains(summary.Outcomes[0].Detail, "merge_requests/7") {
+		t.Errorf("expected the outcome detail to name both the new MR and the closed one, got %q", summary.Outcomes[0].Detail)
+	}
+}
+
+func TestExecute_ReplacePipelineTag_AlreadyFixedIsIdempotent(t *testing.T) {
+	f := newFakeExecutor()
+	f.projects["1"] = domain.Project{ID: "1"}
+	f.ciFiles["1"] = []byte("default:\n  tags:\n    - aks\n") // already correct
+
+	p := domain.Plan{Actions: []domain.PlannedAction{
+		{ResourceType: domain.ResourceTypePipelineConfig, ResourceID: "1", Action: domain.ActionReplacePipelineTag,
+			TagRenames: []domain.TagRename{{Old: "AKS", New: "aks"}}, EvaluatedAt: time.Now()},
+	}}
+	summary := Execute(context.Background(), f, p, ExecuteOptions{Apply: true, Revalidate: true})
+
+	if len(f.renamedMRs) != 0 {
+		t.Errorf("expected no Merge Request when the old tag is no longer present, got %+v", f.renamedMRs)
+	}
+	if summary.Outcomes[0].Result != domain.ResultSkippedAlreadyDone {
+		t.Errorf("expected ResultSkippedAlreadyDone, got %v: %s", summary.Outcomes[0].Result, summary.Outcomes[0].Detail)
+	}
+}
+
+func TestExecute_ReplaceRunnerTag_SwapsTagList(t *testing.T) {
+	f := newFakeExecutor()
+	f.projects["1"] = domain.Project{ID: "1", FullPath: "group/project"}
+	f.runners["5"] = domain.Runner{ID: "5", ImpactKnown: true, InScopeProjectPaths: []string{"group/project"}}
+	f.runnerTags["5"] = []string{"AKS", "other-tag"}
+
+	p := domain.Plan{Scope: domain.PlanScope{Path: "group", Recursive: true}, Actions: []domain.PlannedAction{
+		{ResourceType: domain.ResourceTypeRunner, ResourceID: "5", Action: domain.ActionReplaceRunnerTag,
+			TagRenames: []domain.TagRename{{Old: "AKS", New: "aks"}}, EvaluatedAt: time.Now()},
+	}}
+	summary := Execute(context.Background(), f, p, ExecuteOptions{Apply: true, Revalidate: true})
+
+	got := f.updatedRunnerTags["5"]
+	if !slices.Contains(got, "aks") || slices.Contains(got, "AKS") || !slices.Contains(got, "other-tag") {
+		t.Errorf("expected tags to become [other-tag, aks], got %v", got)
+	}
+	if summary.Outcomes[0].Result != domain.ResultSuccess {
+		t.Errorf("expected ResultSuccess, got %v: %s", summary.Outcomes[0].Result, summary.Outcomes[0].Detail)
+	}
+}
+
+func TestExecute_ReplaceRunnerTag_AlreadyFixedIsIdempotent(t *testing.T) {
+	f := newFakeExecutor()
+	f.projects["1"] = domain.Project{ID: "1", FullPath: "group/project"}
+	f.runners["5"] = domain.Runner{ID: "5", ImpactKnown: true, InScopeProjectPaths: []string{"group/project"}}
+	f.runnerTags["5"] = []string{"aks"} // already correct
+
+	p := domain.Plan{Scope: domain.PlanScope{Path: "group", Recursive: true}, Actions: []domain.PlannedAction{
+		{ResourceType: domain.ResourceTypeRunner, ResourceID: "5", Action: domain.ActionReplaceRunnerTag,
+			TagRenames: []domain.TagRename{{Old: "AKS", New: "aks"}}, EvaluatedAt: time.Now()},
+	}}
+	summary := Execute(context.Background(), f, p, ExecuteOptions{Apply: true, Revalidate: true})
+
+	if len(f.updatedRunnerTags) != 0 {
+		t.Errorf("expected no update when the old tag is no longer present, got %+v", f.updatedRunnerTags)
+	}
+	if summary.Outcomes[0].Result != domain.ResultSkippedAlreadyDone {
+		t.Errorf("expected ResultSkippedAlreadyDone, got %v: %s", summary.Outcomes[0].Result, summary.Outcomes[0].Detail)
+	}
+}
+
+func TestExecute_ReplaceRunnerTag_RejectsChangedLiveImpact(t *testing.T) {
+	f := newFakeExecutor()
+	f.projects["1"] = domain.Project{ID: "1", FullPath: "group/project"}
+	f.runners["5"] = domain.Runner{
+		ID: "5", ImpactKnown: true, InScopeProjectPaths: []string{"group/project"},
+		OutOfScopeProjectPaths: []string{"other/new"},
+	}
+	f.runnerTags["5"] = []string{"AKS"}
+	p := domain.Plan{Scope: domain.PlanScope{Path: "group", Recursive: true}, Actions: []domain.PlannedAction{{
+		ResourceType: domain.ResourceTypeRunner, ResourceID: "5", Action: domain.ActionReplaceRunnerTag,
+		TagRenames: []domain.TagRename{{Old: "AKS", New: "aks"}}, EvaluatedAt: time.Now(),
+	}}}
+	summary := Execute(context.Background(), f, p, ExecuteOptions{Apply: true, Revalidate: true})
+	if summary.Outcomes[0].Result != domain.ResultFailed || len(f.updatedRunnerTags) != 0 {
+		t.Fatalf("changed runner reach must require a new plan, got %+v", summary.Outcomes[0])
 	}
 }
 

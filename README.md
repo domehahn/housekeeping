@@ -512,7 +512,8 @@ No command merges a proposal.
 | `pipelines analyze` | One or more `--tag` | Read GitLab's effective, include-expanded CI configuration without modifying it |
 | `pipelines plan` | One or more `--tag` | Build Merge Request proposal actions for eligible projects |
 | `pipelines proposals status` | One or more `--tag` | Show the newest matching proposal per selected project (`opened`, `merged`, `closed`, `locked`, or `none`) |
-| `--tag TAG` | Required, repeatable | Check/add an exact runner tag; duplicates are removed and order is normalized |
+| `--tag TAG` | Required, repeatable, mutually exclusive with `--replace-tag` (`evaluate`/`plan` only) | Check/add an exact runner tag; duplicates are removed and order is normalized |
+| `--replace-tag OLD:NEW` | `evaluate`/`plan` only; repeatable, mutually exclusive with `--tag` | Correct a wrong CI tag already rolled out (e.g. a case typo); only locations that already have `OLD` are touched |
 | `--include-project REGEX` | Optional, repeatable | Keep projects whose full path matches at least one expression |
 | `--exclude-project REGEX` | Optional, repeatable | Remove matching full paths; exclusions take precedence over inclusions |
 | `--output-plan FILE` | Plan only; optional | Save canonical hashed JSON for `execute` |
@@ -587,6 +588,43 @@ evaluation reports includes as a warning; `pipelines analyze` resolves them
 through GitLab for read-only effective analysis, but plan/apply never edits an
 included source. GitLab `spec:` header documents are preserved.
 
+**Correcting a wrong tag.** Use `--replace-tag OLD:NEW` instead of `--tag` to
+fix a tag that was already rolled out incorrectly - for example, a case typo
+where the CI file ended up with `AKS` but the actual runners are tagged
+`aks` (GitLab tags have no case-folding, so the two never match). Only
+`default.tags`/job `tags:` lists that already contain `OLD` are touched;
+nothing is created or added anywhere the old tag was never present.
+Executing the plan additionally, best-effort, closes any still-open
+scm-cleaner Merge Request that had proposed the wrong tag, since the new,
+corrected Merge Request supersedes it. This never edits an existing Merge
+Request's diff - it opens a new one and closes the old one. A candidate is
+only ever closed if **both** its source branch matches scm-cleaner's
+deterministic branch prefix **and** its description carries the
+cryptographic tag-set marker scm-cleaner itself embeds - so a hand-created
+Merge Request, one proposing a different tag, or one already merged/closed
+is never touched. A failure to close the old one never blocks the new,
+corrected Merge Request from opening. See
+[ADR 0005](docs/adr/0005-ci-tag-management-scope.md) and
+[threat model §13](docs/threat-model.md#13-automatically-closing-a-stale-scm-cleaner-proposal)
+for the full guarantee.
+
+```bash
+# Evaluate which projects still have the wrong tag:
+scm-cleaner pipelines evaluate \
+  --group company/platform --recursive \
+  --replace-tag AKS:aks
+
+# Plan and execute the correction - opens one Merge Request per affected
+# project, and closes any open MR that still proposed "AKS":
+scm-cleaner pipelines plan \
+  --group company/platform --recursive \
+  --replace-tag AKS:aks \
+  --output-plan fix-aks-tag.json
+
+scm-cleaner execute fix-aks-tag.json
+scm-cleaner execute fix-aks-tag.json --apply
+```
+
 ### 8.7 Runner-tag management
 
 `runners list` reports runners available to in-scope projects, their type,
@@ -597,8 +635,9 @@ reach can be proven safely.
 | Command/parameter | Required/default | Function |
 |---|---|---|
 | `runners list` | No local parameters | List available runners, type, tags, explicit external assignments, and impact status |
-| `runners evaluate --tag TAG` | `--tag` required | Report whether each runner has the tag and whether changing it is safe |
-| `runners plan --tag TAG` | `--tag` required | Plan updates only for missing-tag runners with provable reach |
+| `runners evaluate --tag TAG` | `--tag` required, mutually exclusive with `--replace-tag` | Report whether each runner has the tag and whether changing it is safe |
+| `runners plan --tag TAG` | `--tag` required, mutually exclusive with `--replace-tag` | Plan updates only for missing-tag runners with provable reach |
+| `--replace-tag OLD:NEW` | `evaluate`/`plan` only; repeatable, mutually exclusive with `--tag` | Correct a wrong tag already on a runner's `tag_list`; a runner never carrying `OLD` is left untouched |
 | `--output-plan FILE` | Plan only; optional | Save canonical hashed JSON for `execute` |
 | `--max-actions N` | Plan only; config limit | Override `safety.max_actions.runner_tags` for this run |
 | `--max-percentage N` | Plan only; config limit/`0` disabled | Override `safety.max_percentage.runner_tags` for this run |
@@ -635,6 +674,25 @@ scm-cleaner execute runner-tags.json --apply --non-interactive \
   --confirm-scope company/platform/subgroup \
   --confirm-out-of-scope-impact 3
 ```
+
+**Correcting a wrong tag.** Use `--replace-tag OLD:NEW` the same way as for
+`pipelines` (see 8.6) to fix a runner tag rolled out incorrectly - continuing
+the `AKS`/`aks` example, once the runners themselves are affected too:
+
+```bash
+scm-cleaner runners plan \
+  --group company/platform --recursive \
+  --replace-tag AKS:aks \
+  --output-plan fix-aks-runner-tag.json
+
+scm-cleaner execute fix-aks-runner-tag.json
+scm-cleaner execute fix-aks-runner-tag.json --apply --non-interactive \
+  --confirm-scope company/platform
+```
+
+The same out-of-scope-impact guard applies: if any matched runner is shared
+outside the evaluated scope, `--confirm-out-of-scope-impact=<N>` is still
+required, exactly as for adding a tag.
 
 Project runners are evaluated through explicit assignments. A group runner is
 eligible only when its owning group is contained by a recursive scope. Parent-
@@ -1182,6 +1240,19 @@ effective configuration and reveal missing tags in included jobs, but stays
 read-only. See
 [ADR 0005](docs/adr/0005-ci-tag-management-scope.md).
 
+Use `--replace-tag OLD:NEW` in place of `--tag` on `evaluate`/`plan` to
+correct a tag already rolled out wrong (e.g. `AKS` vs. `aks` - GitLab tags
+never case-fold). Only locations that already have `OLD` are touched, and
+executing the resulting plan best-effort closes any still-open scm-cleaner
+Merge Request that had proposed `OLD`, since the corrected Merge Request
+supersedes it - it never edits that old Merge Request's diff. A candidate is
+only closed when both its branch and description match scm-cleaner's own
+deterministic naming and cryptographic tag marker for exactly `OLD`; a
+foreign, differently-tagged, or already-merged/closed Merge Request is never
+touched, and a failure to close the old one never blocks the new one from
+opening. `--tag` and `--replace-tag` are mutually exclusive. See
+[ADR 0005](docs/adr/0005-ci-tag-management-scope.md).
+
 ## 25. Runner tag cleanup
 
 Adds a CI tag directly to the `tag_list` of runners **available to** projects
@@ -1223,6 +1294,12 @@ tag edit detected by the final preflight check is not overwritten. GitLab
 does not expose an atomic compare-and-swap for the subsequent PUT, so a very
 narrow external race remains. See
 [ADR 0005](docs/adr/0005-ci-tag-management-scope.md).
+
+Use `--replace-tag OLD:NEW` in place of `--tag` on `evaluate`/`plan` to
+correct a tag already on a runner's `tag_list` (continuing the same
+`AKS`/`aks` fix as §24, once it has reached the runners themselves): a
+runner never carrying `OLD` is left untouched, and the same
+`--confirm-out-of-scope-impact` guard still applies for a shared runner.
 
 ## 26. Roadmap
 

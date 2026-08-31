@@ -106,6 +106,17 @@ type PipelineConfigProposer interface {
 	// here - callers must have already confirmed patchedContent actually
 	// differs from the current file.
 	ProposePipelineTagChange(ctx context.Context, projectID string, patchedContent []byte, tags []string) (mergeRequestURL string, err error)
+	// ProposePipelineTagRename opens a branch + commit + Merge Request
+	// replacing an old (wrong) CI tag with the corrected one for every
+	// rename pair, and best-effort closes any still-open scm-cleaner
+	// proposal that proposed one of the old tags - identified by the same
+	// cryptographic tag-set marker ListPipelineTagProposals already uses,
+	// so only scm-cleaner's own matching proposals are ever touched, never
+	// an unrelated Merge Request. A failure to close an old proposal is
+	// never fatal to the rename itself: closedProposalURLs reports only
+	// the ones actually closed, and the caller surfaces the difference
+	// between attempted and closed rather than the rename silently failing.
+	ProposePipelineTagRename(ctx context.Context, projectID string, patchedContent []byte, renames []domain.TagRename) (mergeRequestURL string, closedProposalURLs []string, err error)
 }
 
 // PipelineConfigAnalyzer returns GitLab's effective, include-expanded CI

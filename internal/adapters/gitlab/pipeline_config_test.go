@@ -5,6 +5,8 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+
+	"github.com/domehahn/housekeeping/internal/domain"
 )
 
 func TestGetPipelineConfig_ReturnsContentWhenFileExists(t *testing.T) {
@@ -178,6 +180,175 @@ func TestListPipelineTagProposalsFiltersBranchPrefix(t *testing.T) {
 	proposals, err := a.ListPipelineTagProposals(context.Background(), "1", []string{"AKS"})
 	if err != nil || len(proposals) != 1 || proposals[0].State != "merged" {
 		t.Fatalf("ListPipelineTagProposals() = %+v, %v", proposals, err)
+	}
+}
+
+func TestProposePipelineTagRename_HappyPathOpensNewMR(t *testing.T) {
+	renames := []domain.TagRename{{Old: "AKS", New: "aks"}}
+	patched := []byte("default:\n  tags:\n    - aks\n")
+	var gotBranchReq, gotFileReq, gotMRReq bool
+	a := newTestAdapter(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/projects/1"):
+			writeJSON(t, w, map[string]any{"id": 1, "default_branch": "main"})
+		case strings.Contains(r.URL.Path, "/repository/branches/") && r.Method == http.MethodGet:
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte(`{"message":"404 Branch Not Found"}`))
+		case strings.Contains(r.URL.Path, "/repository/branches") && r.Method == http.MethodPost:
+			gotBranchReq = true
+			writeJSON(t, w, map[string]any{"name": renameBranchName(renames, patched)})
+		case strings.Contains(r.URL.Path, "/repository/files/") && r.Method == http.MethodGet:
+			w.Header().Set("Content-Type", "text/plain")
+			_, _ = w.Write([]byte("default:\n  tags:\n    - AKS\n"))
+		case strings.Contains(r.URL.Path, "/repository/files/") && r.Method == http.MethodPut:
+			gotFileReq = true
+			writeJSON(t, w, map[string]any{"file_path": ".gitlab-ci.yml", "branch": renameBranchName(renames, patched)})
+		case strings.HasSuffix(r.URL.Path, "/merge_requests") && r.Method == http.MethodGet:
+			writeJSON(t, w, []map[string]any{})
+		case strings.HasSuffix(r.URL.Path, "/merge_requests") && r.Method == http.MethodPost:
+			gotMRReq = true
+			writeJSON(t, w, map[string]any{"iid": 43, "web_url": "https://gitlab.example.com/group/proj/-/merge_requests/43"})
+		default:
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+	})
+
+	url, closed, err := a.ProposePipelineTagRename(context.Background(), "1", patched, renames)
+	if err != nil {
+		t.Fatalf("ProposePipelineTagRename: %v", err)
+	}
+	if !gotBranchReq || !gotFileReq || !gotMRReq {
+		t.Fatalf("expected branch+file+MR requests, got branch=%v file=%v mr=%v", gotBranchReq, gotFileReq, gotMRReq)
+	}
+	if url != "https://gitlab.example.com/group/proj/-/merge_requests/43" {
+		t.Errorf("unexpected MR url: %s", url)
+	}
+	if len(closed) != 0 {
+		t.Errorf("expected no closed proposals when none exist, got %v", closed)
+	}
+}
+
+func TestProposePipelineTagRename_ClosesSupersededOpenProposal(t *testing.T) {
+	renames := []domain.TagRename{{Old: "AKS", New: "aks"}}
+	patched := []byte("default:\n  tags:\n    - aks\n")
+	var closedIID string
+	a := newTestAdapter(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/projects/1"):
+			writeJSON(t, w, map[string]any{"id": 1, "default_branch": "main"})
+		case strings.Contains(r.URL.Path, "/repository/branches/") && r.Method == http.MethodGet:
+			writeJSON(t, w, map[string]any{"name": renameBranchName(renames, patched)})
+		case strings.Contains(r.URL.Path, "/repository/files/") && r.Method == http.MethodGet:
+			w.Header().Set("Content-Type", "text/plain")
+			_, _ = w.Write(patched)
+		case strings.HasSuffix(r.URL.Path, "/merge_requests") && r.URL.Query().Get("state") == "all":
+			// ListPipelineTagProposals lookup for the old tag "AKS".
+			writeJSON(t, w, []map[string]any{
+				{"iid": 7, "title": "scm-cleaner: add CI tags AKS", "description": proposalTagMarker([]string{"AKS"}), "state": "opened", "source_branch": "scm-cleaner/add-tag-aks-old", "web_url": "https://example/mr/7"},
+			})
+		case strings.HasSuffix(r.URL.Path, "/merge_requests") && r.Method == http.MethodGet:
+			// findOpenProposal for the new rename branch: none yet.
+			writeJSON(t, w, []map[string]any{})
+		case strings.Contains(r.URL.Path, "/merge_requests/7") && r.Method == http.MethodPut:
+			closedIID = "7"
+			writeJSON(t, w, map[string]any{"iid": 7, "state": "closed"})
+		case strings.HasSuffix(r.URL.Path, "/merge_requests") && r.Method == http.MethodPost:
+			writeJSON(t, w, map[string]any{"iid": 43, "web_url": "https://gitlab.example.com/group/proj/-/merge_requests/43"})
+		default:
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+	})
+
+	_, closed, err := a.ProposePipelineTagRename(context.Background(), "1", patched, renames)
+	if err != nil {
+		t.Fatalf("ProposePipelineTagRename: %v", err)
+	}
+	if closedIID != "7" {
+		t.Error("expected the old, open scm-cleaner proposal (iid 7) to be closed")
+	}
+	if len(closed) != 1 || closed[0] != "https://example/mr/7" {
+		t.Errorf("expected closedProposalURLs to report the closed MR, got %v", closed)
+	}
+}
+
+func TestProposePipelineTagRename_LeavesMergedProposalAlone(t *testing.T) {
+	renames := []domain.TagRename{{Old: "AKS", New: "aks"}}
+	patched := []byte("default:\n  tags:\n    - aks\n")
+	putCalled := false
+	a := newTestAdapter(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/projects/1"):
+			writeJSON(t, w, map[string]any{"id": 1, "default_branch": "main"})
+		case strings.Contains(r.URL.Path, "/repository/branches/") && r.Method == http.MethodGet:
+			writeJSON(t, w, map[string]any{"name": renameBranchName(renames, patched)})
+		case strings.Contains(r.URL.Path, "/repository/files/") && r.Method == http.MethodGet:
+			w.Header().Set("Content-Type", "text/plain")
+			_, _ = w.Write(patched)
+		case strings.HasSuffix(r.URL.Path, "/merge_requests") && r.URL.Query().Get("state") == "all":
+			writeJSON(t, w, []map[string]any{
+				{"iid": 7, "title": "scm-cleaner: add CI tags AKS", "description": proposalTagMarker([]string{"AKS"}), "state": "merged", "source_branch": "scm-cleaner/add-tag-aks-old", "web_url": "https://example/mr/7"},
+			})
+		case strings.HasSuffix(r.URL.Path, "/merge_requests") && r.Method == http.MethodGet:
+			writeJSON(t, w, []map[string]any{})
+		case strings.Contains(r.URL.Path, "/merge_requests/7") && r.Method == http.MethodPut:
+			putCalled = true
+			writeJSON(t, w, map[string]any{"iid": 7, "state": "closed"})
+		case strings.HasSuffix(r.URL.Path, "/merge_requests") && r.Method == http.MethodPost:
+			writeJSON(t, w, map[string]any{"iid": 43, "web_url": "https://gitlab.example.com/group/proj/-/merge_requests/43"})
+		default:
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+	})
+
+	_, closed, err := a.ProposePipelineTagRename(context.Background(), "1", patched, renames)
+	if err != nil {
+		t.Fatalf("ProposePipelineTagRename: %v", err)
+	}
+	if putCalled {
+		t.Error("expected an already-merged proposal to never be closed")
+	}
+	if len(closed) != 0 {
+		t.Errorf("expected no closed proposals, got %v", closed)
+	}
+}
+
+func TestProposePipelineTagRename_CloseFailureDoesNotFailRename(t *testing.T) {
+	renames := []domain.TagRename{{Old: "AKS", New: "aks"}}
+	patched := []byte("default:\n  tags:\n    - aks\n")
+	a := newTestAdapter(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/projects/1"):
+			writeJSON(t, w, map[string]any{"id": 1, "default_branch": "main"})
+		case strings.Contains(r.URL.Path, "/repository/branches/") && r.Method == http.MethodGet:
+			writeJSON(t, w, map[string]any{"name": renameBranchName(renames, patched)})
+		case strings.Contains(r.URL.Path, "/repository/files/") && r.Method == http.MethodGet:
+			w.Header().Set("Content-Type", "text/plain")
+			_, _ = w.Write(patched)
+		case strings.HasSuffix(r.URL.Path, "/merge_requests") && r.URL.Query().Get("state") == "all":
+			writeJSON(t, w, []map[string]any{
+				{"iid": 7, "title": "scm-cleaner: add CI tags AKS", "description": proposalTagMarker([]string{"AKS"}), "state": "opened", "source_branch": "scm-cleaner/add-tag-aks-old", "web_url": "https://example/mr/7"},
+			})
+		case strings.HasSuffix(r.URL.Path, "/merge_requests") && r.Method == http.MethodGet:
+			writeJSON(t, w, []map[string]any{})
+		case strings.Contains(r.URL.Path, "/merge_requests/7") && r.Method == http.MethodPut:
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = w.Write([]byte(`{"message":"boom"}`))
+		case strings.HasSuffix(r.URL.Path, "/merge_requests") && r.Method == http.MethodPost:
+			writeJSON(t, w, map[string]any{"iid": 43, "web_url": "https://gitlab.example.com/group/proj/-/merge_requests/43"})
+		default:
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+	})
+
+	url, closed, err := a.ProposePipelineTagRename(context.Background(), "1", patched, renames)
+	if err != nil {
+		t.Fatalf("expected a close failure to never fail the rename itself, got: %v", err)
+	}
+	if url != "https://gitlab.example.com/group/proj/-/merge_requests/43" {
+		t.Errorf("expected the new MR to still be opened, got url=%q", url)
+	}
+	if len(closed) != 0 {
+		t.Errorf("expected no closed proposals reported when closing failed, got %v", closed)
 	}
 }
 
