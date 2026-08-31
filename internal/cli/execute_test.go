@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -87,6 +88,83 @@ func TestExecute_ApplyNonInteractiveWithConfirmScopeDeletes(t *testing.T) {
 	}
 	if !strings.Contains(stdout, "success") {
 		t.Errorf("expected a success result in output, got:\n%s", stdout)
+	}
+}
+
+func TestExecute_AutoMergeIfNoApprovalRequired_MergesAndConfirms(t *testing.T) {
+	c := newFakeClient()
+	c.info = fakeInfo()
+	c.projects = []domain.Project{{ID: "1", FullPath: "company/a"}}
+	c.ciFiles["1"] = []byte("build-job:\n  script: [\"x\"]\n")
+	c.proposeURL = "https://gitlab.example.com/company/a/-/merge_requests/42"
+	c.autoMergeResult = true
+	e := testEnv(c)
+
+	planPath := writeTestPlan(t, []domain.PlannedAction{
+		{ResourceType: domain.ResourceTypePipelineConfig, ResourceID: "1", ResourceName: "company/a",
+			Action: domain.ActionAddPipelineTag, TagValue: "k8s-runner", EvaluatedAt: time.Now()},
+	})
+
+	stdout, _, err := runCmd(newExecuteCmd(e), []string{
+		planPath, "--apply", "--non-interactive", "--confirm-scope", "company", "--auto-merge-if-no-approval-required",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !slices.Equal(c.autoMergeCalls, []string{c.proposeURL}) {
+		t.Errorf("expected MergeIfNoApprovalRequired to be called, got %v", c.autoMergeCalls)
+	}
+	if !strings.Contains(stdout, "merge requested") {
+		t.Errorf("expected confirmation that a merge was requested, got:\n%s", stdout)
+	}
+}
+
+func TestExecute_AutoMergeIfNoApprovalRequired_ReportsNeedsApproval(t *testing.T) {
+	c := newFakeClient()
+	c.info = fakeInfo()
+	c.projects = []domain.Project{{ID: "1", FullPath: "company/a"}}
+	c.ciFiles["1"] = []byte("build-job:\n  script: [\"x\"]\n")
+	c.proposeURL = "https://gitlab.example.com/company/a/-/merge_requests/42"
+	c.autoMergeApproval = true
+	e := testEnv(c)
+
+	planPath := writeTestPlan(t, []domain.PlannedAction{
+		{ResourceType: domain.ResourceTypePipelineConfig, ResourceID: "1", ResourceName: "company/a",
+			Action: domain.ActionAddPipelineTag, TagValue: "k8s-runner", EvaluatedAt: time.Now()},
+	})
+
+	stdout, _, err := runCmd(newExecuteCmd(e), []string{
+		planPath, "--apply", "--non-interactive", "--confirm-scope", "company", "--auto-merge-if-no-approval-required",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(stdout, "require approval") || !strings.Contains(stdout, c.proposeURL) {
+		t.Errorf("expected a needs-approval report naming the MR URL, got:\n%s", stdout)
+	}
+}
+
+func TestExecute_AutoMergeIfNoApprovalRequired_OffByDefault(t *testing.T) {
+	c := newFakeClient()
+	c.info = fakeInfo()
+	c.projects = []domain.Project{{ID: "1", FullPath: "company/a"}}
+	c.ciFiles["1"] = []byte("build-job:\n  script: [\"x\"]\n")
+	c.proposeURL = "https://gitlab.example.com/company/a/-/merge_requests/42"
+	e := testEnv(c)
+
+	planPath := writeTestPlan(t, []domain.PlannedAction{
+		{ResourceType: domain.ResourceTypePipelineConfig, ResourceID: "1", ResourceName: "company/a",
+			Action: domain.ActionAddPipelineTag, TagValue: "k8s-runner", EvaluatedAt: time.Now()},
+	})
+
+	_, _, err := runCmd(newExecuteCmd(e), []string{
+		planPath, "--apply", "--non-interactive", "--confirm-scope", "company",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(c.autoMergeCalls) != 0 {
+		t.Errorf("expected MergeIfNoApprovalRequired to never be called without the flag, got %v", c.autoMergeCalls)
 	}
 }
 

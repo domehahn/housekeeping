@@ -59,6 +59,11 @@ type fakeClient struct {
 	closeOnlyErr       error
 	closeOnlyCalls     map[string][]string
 
+	autoMergeResult   bool // MergeIfNoApprovalRequired's "merged" return
+	autoMergeApproval bool // MergeIfNoApprovalRequired's "requiresApproval" return
+	autoMergeErr      error
+	autoMergeCalls    []string // merge request URLs passed to MergeIfNoApprovalRequired
+
 	runners    []domain.Runner
 	runnersErr error
 	runnerTags map[string][]string
@@ -156,6 +161,13 @@ func (f *fakeClient) ProposePipelineTagRename(_ context.Context, projectID strin
 	}
 	f.renamedTags[projectID] = append([]domain.TagRename{}, renames...)
 	return f.renameURL, f.closedProposalURLs, nil
+}
+func (f *fakeClient) MergeIfNoApprovalRequired(_ context.Context, _ string, mergeRequestURL string) (bool, bool, error) {
+	f.autoMergeCalls = append(f.autoMergeCalls, mergeRequestURL)
+	if f.autoMergeErr != nil {
+		return false, false, f.autoMergeErr
+	}
+	return f.autoMergeResult, f.autoMergeApproval, nil
 }
 func (f *fakeClient) ClosePipelineTagProposals(_ context.Context, projectID string, oldTags []string) ([]string, error) {
 	if f.closeOnlyErr != nil {

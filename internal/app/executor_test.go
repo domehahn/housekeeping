@@ -44,6 +44,11 @@ type fakeExecutor struct {
 	closeOnlyURLs  []string
 	closeOnlyErr   error
 	closeOnlyCalls map[string][]string // projectID -> oldTags, recording every ClosePipelineTagProposals call
+
+	autoMergeResult   bool // MergeIfNoApprovalRequired's "merged" return
+	autoMergeApproval bool // MergeIfNoApprovalRequired's "requiresApproval" return
+	autoMergeErr      error
+	autoMergeCalls    []string // merge request URLs passed to MergeIfNoApprovalRequired
 }
 
 func newFakeExecutor() *fakeExecutor {
@@ -99,6 +104,14 @@ func (f *fakeExecutor) ClosePipelineTagProposals(_ context.Context, projectID st
 	}
 	f.closeOnlyCalls[projectID] = append([]string{}, oldTags...)
 	return f.closeOnlyURLs, nil
+}
+
+func (f *fakeExecutor) MergeIfNoApprovalRequired(_ context.Context, _ string, mergeRequestURL string) (bool, bool, error) {
+	f.autoMergeCalls = append(f.autoMergeCalls, mergeRequestURL)
+	if f.autoMergeErr != nil {
+		return false, false, f.autoMergeErr
+	}
+	return f.autoMergeResult, f.autoMergeApproval, nil
 }
 
 func (f *fakeExecutor) GetRunnerTags(_ context.Context, runnerID string) ([]string, error) {
@@ -476,6 +489,77 @@ func TestExecute_AddRunnerTag_AlreadyPresentIsIdempotent(t *testing.T) {
 	}
 	if summary.Outcomes[0].Result != domain.ResultSkippedAlreadyDone {
 		t.Errorf("expected ResultSkippedAlreadyDone, got %v: %s", summary.Outcomes[0].Result, summary.Outcomes[0].Detail)
+	}
+}
+
+func TestExecute_AddPipelineTag_AutoMergesWhenNoApprovalRequired(t *testing.T) {
+	f := newFakeExecutor()
+	f.projects["1"] = domain.Project{ID: "1"}
+	f.ciFiles["1"] = []byte("build-job:\n  script: [\"echo hi\"]\n")
+	f.proposeMRURL = "https://gitlab.example.com/group/proj/-/merge_requests/42"
+	f.autoMergeResult = true
+
+	p := domain.Plan{Actions: []domain.PlannedAction{
+		{ResourceType: domain.ResourceTypePipelineConfig, ResourceID: "1", Action: domain.ActionAddPipelineTag, TagValue: "k8s-runner", EvaluatedAt: time.Now()},
+	}}
+	summary := Execute(context.Background(), f, p, ExecuteOptions{Apply: true, Revalidate: true, AutoMergeIfNoApprovalRequired: true})
+
+	if !slices.Equal(f.autoMergeCalls, []string{f.proposeMRURL}) {
+		t.Errorf("expected MergeIfNoApprovalRequired to be called with the new MR URL, got %v", f.autoMergeCalls)
+	}
+	if summary.Outcomes[0].Result != domain.ResultSuccess {
+		t.Fatalf("expected ResultSuccess, got %v: %s", summary.Outcomes[0].Result, summary.Outcomes[0].Detail)
+	}
+	if !strings.Contains(summary.Outcomes[0].Detail, "merge requested") {
+		t.Errorf("expected the detail to mention the merge request, got %q", summary.Outcomes[0].Detail)
+	}
+	if len(summary.NeedsApproval) != 0 {
+		t.Errorf("expected no NeedsApproval entries, got %+v", summary.NeedsApproval)
+	}
+}
+
+func TestExecute_AddPipelineTag_ReportsNeedsApprovalWithoutMerging(t *testing.T) {
+	f := newFakeExecutor()
+	f.projects["1"] = domain.Project{ID: "1", FullPath: "group/project"}
+	f.ciFiles["1"] = []byte("build-job:\n  script: [\"echo hi\"]\n")
+	f.proposeMRURL = "https://gitlab.example.com/group/proj/-/merge_requests/42"
+	f.autoMergeApproval = true
+
+	p := domain.Plan{Actions: []domain.PlannedAction{
+		{ResourceType: domain.ResourceTypePipelineConfig, ResourceID: "1", ResourceName: "group/project",
+			Action: domain.ActionAddPipelineTag, TagValue: "k8s-runner", EvaluatedAt: time.Now()},
+	}}
+	summary := Execute(context.Background(), f, p, ExecuteOptions{Apply: true, Revalidate: true, AutoMergeIfNoApprovalRequired: true})
+
+	if summary.Outcomes[0].Result != domain.ResultSuccess {
+		t.Fatalf("expected ResultSuccess (the MR itself was opened successfully), got %v: %s", summary.Outcomes[0].Result, summary.Outcomes[0].Detail)
+	}
+	if !strings.Contains(summary.Outcomes[0].Detail, "requires approval") {
+		t.Errorf("expected the detail to say approval is required, got %q", summary.Outcomes[0].Detail)
+	}
+	if len(summary.NeedsApproval) != 1 || summary.NeedsApproval[0].MergeRequestURL != f.proposeMRURL || summary.NeedsApproval[0].ResourceName != "group/project" {
+		t.Fatalf("expected one NeedsApproval entry for the MR, got %+v", summary.NeedsApproval)
+	}
+}
+
+func TestExecute_AddPipelineTag_AutoMergeOffByDefault(t *testing.T) {
+	f := newFakeExecutor()
+	f.projects["1"] = domain.Project{ID: "1"}
+	f.ciFiles["1"] = []byte("build-job:\n  script: [\"echo hi\"]\n")
+	f.proposeMRURL = "https://gitlab.example.com/group/proj/-/merge_requests/42"
+
+	p := domain.Plan{Actions: []domain.PlannedAction{
+		{ResourceType: domain.ResourceTypePipelineConfig, ResourceID: "1", Action: domain.ActionAddPipelineTag, TagValue: "k8s-runner", EvaluatedAt: time.Now()},
+	}}
+	// AutoMergeIfNoApprovalRequired is left unset (false) - existing
+	// behavior/plans must not change unless explicitly opted in.
+	summary := Execute(context.Background(), f, p, ExecuteOptions{Apply: true, Revalidate: true})
+
+	if len(f.autoMergeCalls) != 0 {
+		t.Errorf("expected MergeIfNoApprovalRequired to never be called without the opt-in flag, got %v", f.autoMergeCalls)
+	}
+	if summary.Outcomes[0].Detail != "merge request opened: "+f.proposeMRURL {
+		t.Errorf("expected the plain, unmodified detail, got %q", summary.Outcomes[0].Detail)
 	}
 }
 

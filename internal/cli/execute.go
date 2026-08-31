@@ -20,11 +20,12 @@ import (
 
 // executeFlags holds every flag `execute` accepts.
 type executeFlags struct {
-	apply                     bool
-	nonInteractive            bool
-	confirmScope              string
-	maxActions, maxPercentage int
-	confirmOutOfScopeImpact   int
+	apply                         bool
+	nonInteractive                bool
+	confirmScope                  string
+	maxActions, maxPercentage     int
+	confirmOutOfScopeImpact       int
+	autoMergeIfNoApprovalRequired bool
 }
 
 func newExecuteCmd(e *env) *cobra.Command {
@@ -44,7 +45,15 @@ With --apply, actions are actually performed. In an interactive terminal
 this requires typing an explicit confirmation phrase; in a non-interactive
 context (--non-interactive, or stdin is not a TTY) you must additionally
 pass --confirm-scope matching the plan's scope path, as an extra guard
-against unattended misfires (e.g. a misconfigured CI job).`,
+against unattended misfires (e.g. a misconfigured CI job).
+
+--auto-merge-if-no-approval-required (opt-in, off by default) merges a
+pipeline-tag Merge Request (add-pipeline-tag/replace-pipeline-tag)
+immediately after it is opened, but only when the project's approval
+rules require zero approvals for it - GitLab is still told to wait for
+the Merge Request's own pipeline to succeed first. A Merge Request that
+does require approval is left open and listed in a separate report so it
+can be handed to approvers (e.g. pasted into a Teams channel).`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runExecute(cmd, e, args[0], flags)
 		},
@@ -57,6 +66,8 @@ against unattended misfires (e.g. a misconfigured CI job).`,
 	cmd.Flags().IntVar(&flags.maxPercentage, "max-percentage", 0, "override the safety.max_percentage guard for this run's resource type (must be explicit)")
 	cmd.Flags().IntVar(&flags.confirmOutOfScopeImpact, "confirm-out-of-scope-impact", 0,
 		"required, and must exactly equal the plan's explicit out-of-scope project assignments, when a runner-tag action has such assignments")
+	cmd.Flags().BoolVar(&flags.autoMergeIfNoApprovalRequired, "auto-merge-if-no-approval-required", false,
+		"merge a pipeline-tag Merge Request immediately if its project requires zero approvals (waits for its pipeline to succeed); Merge Requests needing approval are reported instead")
 	return cmd
 }
 
@@ -96,7 +107,7 @@ func runExecute(cmd *cobra.Command, e *env, planPath string, flags *executeFlags
 		cmd.Println("Dry run: no changes will be made. Pass --apply to execute for real.")
 	}
 
-	return runAndReportExecution(cmd, e, ctx, client, plan, flags.apply)
+	return runAndReportExecution(cmd, e, ctx, client, plan, flags)
 }
 
 // checkExecuteSafetyGuards re-checks the absolute max-actions guard
@@ -120,7 +131,7 @@ func checkExecuteSafetyGuards(cmd *cobra.Command, e *env, plan domain.Plan, flag
 	return exitErr(ExitSafetyGuardTriggered, fmt.Errorf("plan exceeds configured maximum action count"))
 }
 
-func runAndReportExecution(cmd *cobra.Command, e *env, ctx context.Context, client provider.Client, plan domain.Plan, apply bool) error {
+func runAndReportExecution(cmd *cobra.Command, e *env, ctx context.Context, client provider.Client, plan domain.Plan, flags *executeFlags) error {
 	auditLog, err := e.auditWriter()
 	if err != nil {
 		return err
@@ -143,11 +154,12 @@ func runAndReportExecution(cmd *cobra.Command, e *env, ctx context.Context, clie
 	}
 
 	summary := app.Execute(ctx, client, plan, app.ExecuteOptions{
-		Apply:             apply,
-		Revalidate:        e.cfg.Execution.Revalidate,
-		FailFast:          e.cfg.Execution.FailFast,
-		ProjectProtection: projectProtection,
-		UserProtection:    userProtection,
+		Apply:                         flags.apply,
+		Revalidate:                    e.cfg.Execution.Revalidate,
+		FailFast:                      e.cfg.Execution.FailFast,
+		ProjectProtection:             projectProtection,
+		UserProtection:                userProtection,
+		AutoMergeIfNoApprovalRequired: flags.autoMergeIfNoApprovalRequired,
 	})
 
 	for _, o := range summary.Outcomes {
@@ -300,5 +312,25 @@ func renderExecutionSummary(cmd *cobra.Command, e *env, summary app.ExecutionSum
 			summary.CountByResult(domain.ResultSkippedAlreadyDone)+summary.CountByResult(domain.ResultSkippedRevalidate),
 			summary.CountByResult(domain.ResultFailed)),
 	}
-	return output.Render(cmd.OutOrStdout(), e.format, table, summary)
+	if err := output.Render(cmd.OutOrStdout(), e.format, table, summary); err != nil {
+		return err
+	}
+
+	// The approval report is carried inside `summary` already, so a
+	// JSON/YAML render above already included it - only table format
+	// needs a second, explicit table here.
+	if e.format == output.FormatTable && len(summary.NeedsApproval) > 0 {
+		approvalRows := make([][]string, 0, len(summary.NeedsApproval))
+		for _, na := range summary.NeedsApproval {
+			approvalRows = append(approvalRows, []string{na.ResourceID, na.ResourceName, na.MergeRequestURL})
+		}
+		approvalTable := output.Table{
+			Headers: []string{"Project ID", "Project", "Merge Request URL"},
+			Rows:    approvalRows,
+			Footer: fmt.Sprintf("%d merge request(s) require approval before they can be merged - hand these links to an approver",
+				len(summary.NeedsApproval)),
+		}
+		return output.RenderTable(cmd.OutOrStdout(), approvalTable)
+	}
+	return nil
 }

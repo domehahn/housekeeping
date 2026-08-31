@@ -51,11 +51,18 @@ operator never intended to touch.
   rejected rather than risking silent truncation.
 - Changes are **always** proposed as a Merge Request - a content-addressed
   branch and one MR per project - never a direct commit to the default
-  branch. Nothing in this tool merges that MR; a human always reviews the
-  diff and merges it themselves. This is the primary mitigation for the
+  branch. By default, nothing in this tool merges that MR; a human reviews
+  the diff and merges it themselves. This is the primary mitigation for the
   inherent risk of programmatically editing CI configuration: the review
   step that would catch a bad patch happens in GitLab's own MR diff view,
-  not in this tool's output.
+  not in this tool's output. The opt-in `execute
+  --auto-merge-if-no-approval-required` (see below) is a deliberate,
+  narrow exception: it only merges a Merge Request whose project's own
+  approval rules already require zero human sign-off for it - i.e. GitLab
+  itself was already going to let this exact change through unreviewed;
+  scm-cleaner merely avoids leaving it needlessly open. It never bypasses
+  GitLab's own review requirements, and it still waits for the Merge
+  Request's pipeline to succeed before merging.
 - The branch includes a digest of the patched content. Existing matching
   branch content and an open MR are reused, so retries after partial failure
   are idempotent instead of conflicting forever.
@@ -112,6 +119,23 @@ operator never intended to touch.
   `ProposePipelineTagRename` that never touches the file or opens a new
   proposal, reusing the identical marker-scoped, `opened`-only, best-effort
   guarantees.
+- `execute --auto-merge-if-no-approval-required` (opt-in, off by default -
+  see `internal/app/executor.go`'s `maybeAutoMerge`) merges an
+  `add-pipeline-tag`/`replace-pipeline-tag` Merge Request immediately
+  after it is opened, but only after checking that specific Merge
+  Request's own approval configuration via
+  `provider.PipelineTagMerger.MergeIfNoApprovalRequired` -
+  `MergeRequestApprovalsService.GetConfiguration`'s `approvals_required`.
+  Merging is requested with GitLab's `auto_merge` option, so GitLab still
+  waits for the Merge Request's own pipeline to succeed (or merges
+  immediately if it has none) rather than bypassing a pipeline gate. A
+  Merge Request requiring at least one approval is left entirely
+  untouched and instead collected into `ExecutionSummary.NeedsApproval` -
+  every project and Merge Request URL still waiting on a human, in one
+  place an operator can hand to approvers. A failure to check approval
+  status or to merge is surfaced in that action's outcome detail but never
+  turned into a failed outcome, since the Merge Request itself was already
+  opened successfully.
 
 **Runner tags (`runners` command):**
 

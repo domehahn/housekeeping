@@ -2,6 +2,7 @@ package gitlab
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"strings"
 	"testing"
@@ -390,6 +391,80 @@ func TestClosePipelineTagProposals_NoMatchReturnsEmpty(t *testing.T) {
 	closed, err := a.ClosePipelineTagProposals(context.Background(), "1", []string{"AKS"})
 	if err != nil || len(closed) != 0 {
 		t.Fatalf("ClosePipelineTagProposals() = %v, %v; want empty, nil", closed, err)
+	}
+}
+
+func TestMergeIfNoApprovalRequired_MergesWhenZeroApprovalsRequired(t *testing.T) {
+	var gotAutoMerge bool
+	a := newTestAdapter(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/approvals") && r.Method == http.MethodGet:
+			writeJSON(t, w, map[string]any{"approvals_required": 0})
+		case strings.Contains(r.URL.Path, "/merge_requests/42/merge") && r.Method == http.MethodPut:
+			var body map[string]any
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			if autoMerge, _ := body["auto_merge"].(bool); !autoMerge {
+				t.Errorf("expected auto_merge=true in request body, got %v", body)
+			}
+			gotAutoMerge = true
+			writeJSON(t, w, map[string]any{"iid": 42, "state": "merged"})
+		default:
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+	})
+
+	merged, requiresApproval, err := a.MergeIfNoApprovalRequired(context.Background(), "1", "https://gitlab.example.com/group/proj/-/merge_requests/42")
+	if err != nil {
+		t.Fatalf("MergeIfNoApprovalRequired: %v", err)
+	}
+	if !merged || requiresApproval {
+		t.Errorf("expected merged=true, requiresApproval=false, got merged=%v requiresApproval=%v", merged, requiresApproval)
+	}
+	if !gotAutoMerge {
+		t.Error("expected the merge endpoint to be called")
+	}
+}
+
+func TestMergeIfNoApprovalRequired_LeavesOpenWhenApprovalRequired(t *testing.T) {
+	a := newTestAdapter(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/approvals") && r.Method == http.MethodGet:
+			writeJSON(t, w, map[string]any{"approvals_required": 1})
+		default:
+			t.Fatalf("unexpected request: %s %s (approval is required, must never attempt to merge)", r.Method, r.URL.Path)
+		}
+	})
+
+	merged, requiresApproval, err := a.MergeIfNoApprovalRequired(context.Background(), "1", "https://gitlab.example.com/group/proj/-/merge_requests/42")
+	if err != nil {
+		t.Fatalf("MergeIfNoApprovalRequired: %v", err)
+	}
+	if merged || !requiresApproval {
+		t.Errorf("expected merged=false, requiresApproval=true, got merged=%v requiresApproval=%v", merged, requiresApproval)
+	}
+}
+
+func TestMergeRequestIIDFromURL(t *testing.T) {
+	tests := map[string]struct {
+		want    int64
+		wantErr bool
+	}{
+		"https://gitlab.example.com/group/proj/-/merge_requests/42":    {want: 42},
+		"https://gitlab.example.com/group/proj/-/merge_requests/7?x=1": {want: 7},
+		"https://gitlab.example.com/group/proj/-/merge_requests":       {wantErr: true},
+		"not a url at all": {wantErr: true},
+	}
+	for url, tc := range tests {
+		got, err := mergeRequestIIDFromURL(url)
+		if tc.wantErr {
+			if err == nil {
+				t.Errorf("mergeRequestIIDFromURL(%q): expected an error", url)
+			}
+			continue
+		}
+		if err != nil || got != tc.want {
+			t.Errorf("mergeRequestIIDFromURL(%q) = %d, %v; want %d, nil", url, got, err, tc.want)
+		}
 	}
 }
 
