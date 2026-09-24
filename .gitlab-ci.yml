@@ -16,7 +16,7 @@ variables:
   SCM_CLEANER_RUNNER_TAG: "docker"
 
 default:
-  image: golang:1.24
+  image: golang:1.26
   cache:
     key: go-mod-cache
     paths:
@@ -38,6 +38,12 @@ format-check:
   script:
     - test -z "$(gofmt -l .)" || (gofmt -l . && exit 1)
 
+tidy-check:
+  stage: check
+  script:
+    - go mod tidy
+    - git diff --exit-code go.mod go.sum
+
 vet:
   stage: check
   script:
@@ -45,7 +51,7 @@ vet:
 
 lint:
   stage: check
-  image: golangci/golangci-lint:latest
+  image: golangci/golangci-lint:v1.64.5
   script:
     - golangci-lint run
 
@@ -62,15 +68,15 @@ race-test:
 build:
   stage: build
   script:
-    - make build
+    - make release
   artifacts:
     paths:
       - bin/
     expire_in: 1 week
 
-# Optional: dependency vulnerability scanning.
+# Dependency vulnerability scanning (blocking).
 security-scan:
   stage: check
-  allow_failure: true
   script:
-    - go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+    - go run golang.org/x/vuln/cmd/govulncheck@v1.1.4 ./...
+

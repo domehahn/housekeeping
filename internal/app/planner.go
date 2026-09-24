@@ -36,6 +36,33 @@ func BuildProjectPlan(
 	}
 }
 
+// BuildBranchDeletionPlan creates one project-scoped action per selected
+// branch. The project ID remains the stable resource identity; BranchName
+// distinguishes multiple branch actions targeting that project.
+func BuildBranchDeletionPlan(providerName, instance string, project domain.Project, branches []domain.Branch, clock domain.Clock) domain.Plan {
+	now := clock.Now()
+	actions := make([]domain.PlannedAction, 0, len(branches))
+	for _, branch := range branches {
+		actions = append(actions, domain.PlannedAction{
+			ResourceType: domain.ResourceTypeProject,
+			ResourceID:   project.ID,
+			ResourceName: project.FullPath,
+			BranchName:   branch.Name,
+			Action:       domain.ActionDeleteBranch,
+			Reason:       []string{"selected branch for deletion"},
+			EvaluatedAt:  now,
+		})
+	}
+	return domain.Plan{
+		Version:   domain.PlanVersion,
+		Provider:  providerName,
+		Instance:  instance,
+		Scope:     domain.PlanScope{Type: domain.ScopeTypeProject, ID: project.ID, Path: project.FullPath},
+		CreatedAt: now,
+		Actions:   actions,
+	}
+}
+
 // BuildUserPlan turns matched (non-protected) user evaluations into a
 // domain.Plan.
 func BuildUserPlan(

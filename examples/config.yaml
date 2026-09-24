@@ -31,6 +31,20 @@ scope:
   group: engineering
   recursive: true
 
+# --- Optional mail delivery -------------------------------------------
+# `users email` can preview recipients without this block. `--send` needs
+# an SMTP server and a sender address. Password values are always referenced
+# from an environment variable or the native keychain, never stored here.
+# email:
+#   smtp:
+#     host: smtp.example.com
+#     port: 587
+#     username: housekeeping@example.com
+#     password:
+#       source: env
+#       env: SMTP_PASSWORD
+#     from: housekeeping@example.com
+
 # --- Project cleanup policy -------------------------------------------
 
 projects:

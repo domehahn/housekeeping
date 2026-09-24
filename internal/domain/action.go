@@ -29,6 +29,10 @@ const (
 	ActionAddRunnerTag       ActionType = "add-runner-tag"
 	ActionReplacePipelineTag ActionType = "replace-pipeline-tag"
 	ActionReplaceRunnerTag   ActionType = "replace-runner-tag"
+
+	// ActionDeleteBranch deletes one named branch from a project. The
+	// containing project is held in PlannedAction.ResourceID.
+	ActionDeleteBranch ActionType = "delete-branch"
 )
 
 // TagRename is a single old-tag-to-new-tag correction, e.g. fixing a
@@ -65,6 +69,10 @@ type PlannedAction struct {
 	// TagRenames contains the old->new tag corrections applied atomically
 	// by an ActionReplacePipelineTag or ActionReplaceRunnerTag action.
 	TagRenames []TagRename `json:"tagRenames,omitempty"`
+	// BranchName identifies the branch for ActionDeleteBranch. It is kept
+	// separate from ResourceID because several branch actions target one
+	// project.
+	BranchName string `json:"branchName,omitempty"`
 	// OutOfScopeProjectCount is set only for ActionAddRunnerTag: the
 	// number of projects using that runner outside the evaluated scope
 	// (0 for a non-shared runner, or one only used within scope). This
@@ -93,6 +101,26 @@ func (a PlannedAction) Tags() []string {
 		return []string{a.TagValue}
 	}
 	return nil
+}
+
+// IsRunnerMutation reports whether a planned action is a mutating operation on a runner.
+func (a PlannedAction) IsRunnerMutation() bool {
+	if a.ResourceType != ResourceTypeRunner {
+		return false
+	}
+	return a.Action != ActionReport
+}
+
+// OutOfScopeImpact returns the number of explicit out-of-scope project assignments
+// affected by a mutating runner action.
+func (a PlannedAction) OutOfScopeImpact() int {
+	if !a.IsRunnerMutation() {
+		return 0
+	}
+	if a.OutOfScopeProjectCount > 0 {
+		return a.OutOfScopeProjectCount
+	}
+	return len(a.OutOfScopeProjectPaths)
 }
 
 // ExecutionResult is the outcome of attempting a single PlannedAction.

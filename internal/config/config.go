@@ -6,8 +6,10 @@
 package config
 
 import (
+	"crypto/sha256"
 	"fmt"
 	"regexp"
+	"time"
 
 	"github.com/domehahn/housekeeping/internal/secrets"
 )
@@ -21,14 +23,21 @@ type Config struct {
 
 	Projects ProjectsConfig `yaml:"projects"`
 	Users    UsersConfig    `yaml:"users"`
+	Email    EmailConfig    `yaml:"email"`
 
 	Safety      SafetyConfig      `yaml:"safety"`
 	Execution   ExecutionConfig   `yaml:"execution"`
+	Audit       AuditConfig       `yaml:"audit"`
 	Performance PerformanceConfig `yaml:"performance"`
 
 	// Output is the default rendering format (table|json|yaml) when
 	// --output is not given on the command line.
 	Output string `yaml:"output"`
+}
+
+type AuditConfig struct {
+	RequiredForApply bool   `yaml:"required_for_apply"`
+	Path             string `yaml:"path"`
 }
 
 type ProviderConfig struct {
@@ -47,6 +56,8 @@ type GitLabConfig struct {
 	// InsecureSkipTLSVerify disables TLS certificate verification. Must be
 	// explicitly opted into; the CLI prints a loud warning when enabled.
 	InsecureSkipTLSVerify bool `yaml:"insecure_skip_tls_verify"`
+	// AllowInsecureHTTP permits plain http:// connections to remote hosts.
+	AllowInsecureHTTP bool `yaml:"allow_insecure_http"`
 }
 
 // TokenConfig is the YAML representation of a generic secret reference.
@@ -131,6 +142,19 @@ type UsersConfig struct {
 	ExcludeCurrentUser bool               `yaml:"exclude_current_user"`
 }
 
+// EmailConfig configures the SMTP sender used by `users mail`.
+type EmailConfig struct {
+	SMTP SMTPConfig `yaml:"smtp"`
+}
+
+type SMTPConfig struct {
+	Host     string      `yaml:"host"`
+	Port     int         `yaml:"port"`
+	Username string      `yaml:"username"`
+	Password TokenConfig `yaml:"password"`
+	From     string      `yaml:"from"`
+}
+
 type UserInactiveConfig struct {
 	Enabled          bool   `yaml:"enabled"`
 	LastLoginDays    int    `yaml:"last_login_days"`
@@ -183,8 +207,9 @@ type MaxPercentageConfig struct {
 }
 
 type ExecutionConfig struct {
-	Revalidate bool `yaml:"revalidate"`
-	FailFast   bool `yaml:"fail_fast"`
+	Revalidate bool          `yaml:"revalidate"`
+	FailFast   bool          `yaml:"fail_fast"`
+	MaxPlanAge time.Duration `yaml:"max_plan_age"`
 }
 
 type PerformanceConfig struct {
@@ -212,6 +237,7 @@ func Default() Config {
 		Execution: ExecutionConfig{
 			Revalidate: true,
 			FailFast:   false,
+			MaxPlanAge: 24 * time.Hour,
 		},
 		Performance: PerformanceConfig{Workers: 5},
 		Output:      "table",
@@ -237,6 +263,7 @@ func (c Config) Validate() error {
 		c.validateUsers,
 		c.validateSafety,
 		c.validatePerformanceAndOutput,
+		c.validateEmail,
 	} {
 		if err := fn(); err != nil {
 			return err
@@ -244,6 +271,49 @@ func (c Config) Validate() error {
 	}
 	return nil
 }
+
+func (c Config) validateEmail() error {
+	s := c.Email.SMTP
+	if s.Host == "" && s.Port == 0 && s.Username == "" && s.Password.isZero() && s.From == "" {
+		return nil
+	}
+	if s.Host == "" {
+		return fmt.Errorf("config: email.smtp.host is required when SMTP is configured")
+	}
+	if s.Port == 0 {
+		return fmt.Errorf("config: email.smtp.port is required when SMTP is configured")
+	}
+	if s.Port < 1 || s.Port > 65535 {
+		return fmt.Errorf("config: email.smtp.port must be between 1 and 65535")
+	}
+	if s.From == "" {
+		return fmt.Errorf("config: email.smtp.from is required when SMTP is configured")
+	}
+	if !s.Password.isZero() {
+		if _, err := tokenReference(s.Password, "email.smtp.password"); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func tokenReference(t TokenConfig, field string) (secrets.Reference, error) {
+	if t.Source == secrets.SourceEnv && t.Env != "" && t.Service == "" && t.Account == "" {
+		return secrets.Reference{Source: t.Source, Env: t.Env}, nil
+	}
+	if t.Source == secrets.SourceKeychain && t.Service != "" && t.Env == "" {
+		return secrets.Reference{Source: t.Source, Service: t.Service, Account: t.Account}, nil
+	}
+	return secrets.Reference{}, fmt.Errorf("config: %s must be a valid env or keychain secret reference", field)
+}
+
+// EmailPasswordReference returns the configured SMTP password reference.
+func (c EmailConfig) EmailPasswordReference() (secrets.Reference, error) {
+	return tokenReference(c.SMTP.Password, "email.smtp.password")
+}
+
+// HasPassword reports whether SMTP password authentication was configured.
+func (c SMTPConfig) HasPassword() bool { return !c.Password.isZero() }
 
 func (c Config) validateProvider() error {
 	switch c.Provider.Type {
@@ -359,4 +429,14 @@ func validateRegex(pattern string) error {
 		return fmt.Errorf("invalid regex %q: %w", pattern, err)
 	}
 	return nil
+}
+
+// ComputeConfigDigest calculates a SHA-256 fingerprint over all safety-relevant
+// evaluation settings (excluding secrets and connection endpoints).
+func (c Config) ComputeConfigDigest() string {
+	h := sha256.New()
+	repr := fmt.Sprintf("v:%d|scope:%+v|projects:%+v|users:%+v|safety:%+v",
+		c.Version, c.Scope, c.Projects, c.Users, c.Safety)
+	h.Write([]byte(repr))
+	return fmt.Sprintf("sha256:%x", h.Sum(nil))
 }

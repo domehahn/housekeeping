@@ -1,9 +1,11 @@
 package app
 
 import (
+	"context"
 	"fmt"
 
 	"github.com/domehahn/housekeeping/internal/domain"
+	"github.com/domehahn/housekeeping/internal/provider"
 )
 
 // ResourceLimit is the pair of guard thresholds execution must never
@@ -99,15 +101,23 @@ func CheckGuards(plan domain.Plan, discovered map[domain.ResourceType]int, limit
 			})
 		}
 
-		total := discovered[rt]
-		if limit.MaxPercentage > 0 && total > 0 {
-			pct := percentage(actions, total)
-			if pct > limit.MaxPercentage {
+		total, hasTotal := discovered[rt]
+		if limit.MaxPercentage > 0 && actions > 0 {
+			if !hasTotal || total <= 0 {
 				violations = append(violations, GuardViolation{
 					Resource: rt, Guard: "max_percentage",
-					Limit: limit.MaxPercentage, Actual: pct,
-					Message: fmt.Sprintf("planned %s (%d of %d, %d%%) exceed configured maximum percentage (%d%%)", resourceLabel(rt), actions, total, pct, limit.MaxPercentage),
+					Limit: limit.MaxPercentage, Actual: 0,
+					Message: fmt.Sprintf("cannot establish population denominator for %s to evaluate percentage guard (fail closed)", resourceLabel(rt)),
 				})
+			} else {
+				pct := percentage(actions, total)
+				if pct > limit.MaxPercentage {
+					violations = append(violations, GuardViolation{
+						Resource: rt, Guard: "max_percentage",
+						Limit: limit.MaxPercentage, Actual: pct,
+						Message: fmt.Sprintf("planned %s (%d of %d, %d%%) exceed configured maximum percentage (%d%%)", resourceLabel(rt), actions, total, pct, limit.MaxPercentage),
+					})
+				}
 			}
 		}
 	}
@@ -129,4 +139,56 @@ func percentage(part, total int) int {
 	// Round up so a safety limit can never be bypassed by integer
 	// truncation (for example, 1/6 is 16.67%, not a permitted 16%).
 	return (part*100 + total - 1) / total
+}
+
+// RediscoverScopePopulation queries the provider for current resource populations in scope.
+func RediscoverScopePopulation(ctx context.Context, client provider.Client, scope domain.Scope, resourceTypes []domain.ResourceType) (map[domain.ResourceType]int, error) {
+	counts := map[domain.ResourceType]int{}
+	if client == nil {
+		return counts, fmt.Errorf("provider client is nil")
+	}
+
+	for _, rt := range resourceTypes {
+		switch rt {
+		case domain.ResourceTypeProject, domain.ResourceTypePipelineConfig:
+			if _, ok := counts[domain.ResourceTypeProject]; !ok {
+				if scope.Type == domain.ScopeTypeProject {
+					branches, err := client.ListBranches(ctx, scope.ID)
+					if err != nil {
+						return nil, fmt.Errorf("list project branches: %w", err)
+					}
+					counts[domain.ResourceTypeProject] = len(branches)
+					counts[domain.ResourceTypePipelineConfig] = len(branches)
+				} else {
+					projects, err := client.ListProjects(ctx, scope)
+					if err != nil {
+						return nil, fmt.Errorf("list projects: %w", err)
+					}
+					counts[domain.ResourceTypeProject] = len(projects)
+					counts[domain.ResourceTypePipelineConfig] = len(projects)
+				}
+			}
+		case domain.ResourceTypeUser:
+			members, err := client.ListGroupMembers(ctx, scope)
+			if err != nil {
+				return nil, fmt.Errorf("list group members: %w", err)
+			}
+			counts[domain.ResourceTypeUser] = len(members)
+		case domain.ResourceTypeRunner:
+			projects, err := client.ListProjects(ctx, scope)
+			if err != nil {
+				return nil, fmt.Errorf("list projects for runner scope: %w", err)
+			}
+			projectIDs := make([]string, len(projects))
+			for i, p := range projects {
+				projectIDs[i] = p.ID
+			}
+			runners, err := client.ListRunnersForProjects(ctx, scope, projectIDs)
+			if err != nil {
+				return nil, fmt.Errorf("list runners: %w", err)
+			}
+			counts[domain.ResourceTypeRunner] = len(runners)
+		}
+	}
+	return counts, nil
 }

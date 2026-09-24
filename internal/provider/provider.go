@@ -47,6 +47,21 @@ type ProjectArchiver interface {
 	ArchiveProject(ctx context.Context, projectID string) error
 }
 
+// BranchReader lists branches in a project.
+type BranchReader interface {
+	ListBranches(ctx context.Context, projectID string) ([]domain.Branch, error)
+}
+
+// BranchGetter fetches one branch for safe pre-execution revalidation.
+type BranchGetter interface {
+	GetBranch(ctx context.Context, projectID, branchName string) (domain.Branch, error)
+}
+
+// BranchDeleter deletes one branch from a project.
+type BranchDeleter interface {
+	DeleteBranch(ctx context.Context, projectID, branchName string) error
+}
+
 // GroupMemberReader lists members of a resolved scope (optionally spanning
 // subgroups), annotated with how each membership was obtained.
 type GroupMemberReader interface {
@@ -185,16 +200,18 @@ type InfoReporter interface {
 	Info(ctx context.Context) (Info, error)
 }
 
-// Client aggregates every port a concrete adapter implements. Use cases and
-// the CLI wire against this for convenience, but each internal/app
-// function still declares only the narrow interfaces it needs as
-// parameters, keeping the dependency explicit and independently testable.
-type Client interface {
+// CoreProvider aggregates general SCM platform capabilities (repositories,
+// memberships, user accounts, and scope resolution) that any SCM provider
+// (GitLab, GitHub, Bitbucket, Azure DevOps) can support.
+type CoreProvider interface {
 	ScopeResolver
 	ProjectReader
 	ProjectGetter
 	ProjectDeleter
 	ProjectArchiver
+	BranchReader
+	BranchGetter
+	BranchDeleter
 	GroupMemberReader
 	GroupMemberGetter
 	GroupMemberRemover
@@ -205,10 +222,23 @@ type Client interface {
 	InfoReporter
 	BillableMembersReader
 	UserMembershipReader
+}
+
+// GitLabCIProvider aggregates GitLab-specific CI pipeline patching and runner management capabilities.
+type GitLabCIProvider interface {
 	PipelineConfigProposer
 	PipelineConfigAnalyzer
 	PipelineProposalReporter
 	PipelineTagMerger
 	RunnerScanner
 	RunnerTagUpdater
+}
+
+// Client aggregates every port a concrete adapter implements. Use cases and
+// the CLI wire against this for convenience, but each internal/app
+// function still declares only the narrow interfaces it needs as
+// parameters, keeping the dependency explicit and independently testable.
+type Client interface {
+	CoreProvider
+	GitLabCIProvider
 }

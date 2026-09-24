@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -46,5 +47,53 @@ func TestLoggerWritesOwnerOnlyJSONLines(t *testing.T) {
 	}
 	if got.ResourceID != "1" || got.Result != domain.ResultSuccess {
 		t.Fatalf("unexpected audit record: %+v", got)
+	}
+}
+
+func TestVerifyAuditChain_ValidChain(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "audit.jsonl")
+	logger, err := NewLogger(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r1 := Record{Timestamp: time.Now(), Provider: "gitlab", ResourceType: domain.ResourceTypeProject, ResourceID: "1", Action: domain.ActionDeleteProject, Result: domain.ResultSuccess}
+	r2 := Record{Timestamp: time.Now(), Provider: "gitlab", ResourceType: domain.ResourceTypeUser, ResourceID: "2", Action: domain.ActionBlockUser, Result: domain.ResultSuccess}
+	_ = logger.Write(r1)
+	_ = logger.Write(r2)
+	_ = logger.Close()
+
+	f, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = f.Close() }()
+
+	if err := VerifyAuditChain(f); err != nil {
+		t.Fatalf("VerifyAuditChain failed on valid chain: %v", err)
+	}
+}
+
+func TestVerifyAuditChain_DetectsTampering(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "audit.jsonl")
+	logger, err := NewLogger(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = logger.Write(Record{Timestamp: time.Now(), Provider: "gitlab", ResourceType: domain.ResourceTypeProject, ResourceID: "1", Action: domain.ActionDeleteProject, Result: domain.ResultSuccess})
+	_ = logger.Write(Record{Timestamp: time.Now(), Provider: "gitlab", ResourceType: domain.ResourceTypeUser, ResourceID: "2", Action: domain.ActionBlockUser, Result: domain.ResultSuccess})
+	_ = logger.Close()
+
+	content, _ := os.ReadFile(path)
+	tampered := strings.Replace(string(content), `"resourceId":"1"`, `"resourceId":"999"`, 1)
+	_ = os.WriteFile(path, []byte(tampered), 0o600)
+
+	f, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = f.Close() }()
+
+	if err := VerifyAuditChain(f); err == nil {
+		t.Error("expected VerifyAuditChain to detect tampered record content")
 	}
 }

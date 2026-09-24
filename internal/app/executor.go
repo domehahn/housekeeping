@@ -7,6 +7,7 @@ import (
 	"slices"
 	"time"
 
+	"github.com/domehahn/housekeeping/internal/audit"
 	"github.com/domehahn/housekeeping/internal/ciyaml"
 	"github.com/domehahn/housekeeping/internal/domain"
 	"github.com/domehahn/housekeeping/internal/provider"
@@ -20,6 +21,8 @@ type Executor interface {
 	provider.ProjectGetter
 	provider.ProjectDeleter
 	provider.ProjectArchiver
+	provider.BranchGetter
+	provider.BranchDeleter
 	provider.UserGetter
 	provider.GroupMemberGetter
 	provider.GroupMemberRemover
@@ -59,6 +62,14 @@ type ExecuteOptions struct {
 	// approval is required, the Merge Request is left open and reported
 	// in ExecutionSummary.NeedsApproval instead of being merged.
 	AutoMergeIfNoApprovalRequired bool
+
+	// Incremental audit options
+	AuditWriter        audit.Writer
+	RunID              string
+	ConfigDigest       string
+	ToolVersion        string
+	ToolCommit         string
+	AuthenticatedActor string
 }
 
 // NeedsApprovalEntry names one pipeline-tag Merge Request that
@@ -103,13 +114,12 @@ func (s ExecutionSummary) AllFailed() bool {
 }
 
 // Execute carries out every action in a plan in order, honoring dry-run,
-// revalidation, idempotency, and fail-fast settings. It never stops
-// processing on an individual failure unless FailFast is set - a broken
-// resource must not prevent unrelated resources in the same plan from
-// being cleaned up.
+// revalidation, idempotency, and fail-fast settings. It emits incremental
+// audit records before (intent) and after (result) each action.
 func Execute(ctx context.Context, client Executor, plan domain.Plan, opts ExecuteOptions) ExecutionSummary {
 	summary := ExecutionSummary{Outcomes: make([]domain.ActionOutcome, 0, len(plan.Actions))}
 	var needsApproval []NeedsApprovalEntry
+	seq := 0
 
 	for _, action := range plan.Actions {
 		if err := ctx.Err(); err != nil {
@@ -119,8 +129,61 @@ func Execute(ctx context.Context, client Executor, plan domain.Plan, opts Execut
 			break
 		}
 
+		seq++
+		if opts.AuditWriter != nil {
+			rec := audit.Record{
+				RunID:              opts.RunID,
+				Sequence:           seq,
+				Timestamp:          time.Now(),
+				Provider:           plan.Provider,
+				Instance:           plan.Instance,
+				AuthenticatedActor: opts.AuthenticatedActor,
+				Scope:              plan.Scope.Path,
+				PlanHash:           plan.Hash,
+				PlanVersion:        plan.Version,
+				PlanCreatedAt:      plan.CreatedAt,
+				ConfigDigest:       opts.ConfigDigest,
+				ToolVersion:        opts.ToolVersion,
+				ToolCommit:         opts.ToolCommit,
+				ResourceType:       action.ResourceType,
+				ResourceID:         action.ResourceID,
+				ResourceName:       action.ResourceName,
+				Action:             action.Action,
+				Phase:              "intent",
+				DryRun:             !opts.Apply,
+			}
+			_ = opts.AuditWriter.Write(rec)
+		}
+
 		outcome := executeOne(ctx, client, plan.Scope, action, opts, &needsApproval)
 		summary.Outcomes = append(summary.Outcomes, outcome)
+
+		if opts.AuditWriter != nil {
+			rec := audit.Record{
+				RunID:              opts.RunID,
+				Sequence:           seq,
+				Timestamp:          time.Now(),
+				Provider:           plan.Provider,
+				Instance:           plan.Instance,
+				AuthenticatedActor: opts.AuthenticatedActor,
+				Scope:              plan.Scope.Path,
+				PlanHash:           plan.Hash,
+				PlanVersion:        plan.Version,
+				PlanCreatedAt:      plan.CreatedAt,
+				ConfigDigest:       opts.ConfigDigest,
+				ToolVersion:        opts.ToolVersion,
+				ToolCommit:         opts.ToolCommit,
+				ResourceType:       outcome.Action.ResourceType,
+				ResourceID:         outcome.Action.ResourceID,
+				ResourceName:       outcome.Action.ResourceName,
+				Action:             outcome.Action.Action,
+				Phase:              "result",
+				Result:             outcome.Result,
+				Detail:             outcome.Detail,
+				DryRun:             !opts.Apply,
+			}
+			_ = opts.AuditWriter.Write(rec)
+		}
 
 		if opts.FailFast && outcome.Result == domain.ResultFailed {
 			break
@@ -177,6 +240,9 @@ func executeOne(ctx context.Context, client Executor, scope domain.PlanScope, ac
 func revalidate(ctx context.Context, client Executor, action domain.PlannedAction, opts ExecuteOptions) (skip bool, detail string) {
 	switch action.ResourceType {
 	case domain.ResourceTypeProject:
+		if action.Action == domain.ActionDeleteBranch {
+			return revalidateBranch(ctx, client, action, opts)
+		}
 		return revalidateProject(ctx, client, action, opts)
 	case domain.ResourceTypeUser:
 		return revalidateUser(ctx, client, action, opts)
@@ -185,6 +251,39 @@ func revalidate(ctx context.Context, client Executor, action domain.PlannedActio
 	default:
 		return false, ""
 	}
+}
+
+func revalidateBranch(ctx context.Context, client Executor, action domain.PlannedAction, opts ExecuteOptions) (bool, string) {
+	if action.BranchName == "" {
+		return true, "branch deletion action is missing a branch name"
+	}
+	proj, err := client.GetProject(ctx, action.ResourceID)
+	if err != nil {
+		return true, "project revalidation failed, skipping to be safe: " + err.Error()
+	}
+	if proj.FullPath != action.ResourceName {
+		return true, fmt.Sprintf("project path changed since planning (%q -> %q)", action.ResourceName, proj.FullPath)
+	}
+	branch, err := client.GetBranch(ctx, action.ResourceID, action.BranchName)
+	if err != nil {
+		var pErr *provider.Error
+		if errors.As(err, &pErr) && pErr.Kind == provider.KindNotFound {
+			return false, "" // let deletion report an idempotent no-op
+		}
+		return true, "branch revalidation failed, skipping to be safe: " + err.Error()
+	}
+	if branch.Name != action.BranchName {
+		return true, "branch name changed since planning"
+	}
+	if branch.Protected || branch.Default {
+		return true, "protected/default branches cannot be deleted"
+	}
+	if opts.ProjectProtection != nil {
+		if protected, reason := opts.ProjectProtection.IsProtected(proj); protected {
+			return true, reason
+		}
+	}
+	return false, ""
 }
 
 func revalidatePipelineProject(ctx context.Context, client Executor, action domain.PlannedAction, opts ExecuteOptions) (bool, string) {
@@ -297,6 +396,11 @@ func performAction(ctx context.Context, client Executor, scope domain.PlanScope,
 		return "", client.DeleteProject(ctx, action.ResourceID)
 	case domain.ActionArchiveProject:
 		return "", client.ArchiveProject(ctx, action.ResourceID)
+	case domain.ActionDeleteBranch:
+		if action.BranchName == "" {
+			return "", fmt.Errorf("delete-branch action for project %s is missing a branch name", action.ResourceID)
+		}
+		return "", client.DeleteBranch(ctx, action.ResourceID, action.BranchName)
 	case domain.ActionRemoveGroupMember:
 		if action.GroupID == "" {
 			return "", fmt.Errorf("remove-from-group action for user %s is missing a group ID", action.ResourceID)

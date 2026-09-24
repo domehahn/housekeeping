@@ -27,6 +27,7 @@ type fakeClient struct {
 
 	projects    []domain.Project
 	projectsErr error
+	branches    map[string]domain.Branch
 
 	members    []domain.User
 	membersErr error
@@ -70,6 +71,8 @@ type fakeClient struct {
 
 	deletedProjects   map[string]bool
 	removedMembers    map[string]bool
+	blockedUsers      map[string]bool
+	deletedBranches   map[string]bool
 	failDeleteProject string // if set, DeleteProject for this ID returns a generic (non-404) error
 }
 
@@ -87,6 +90,9 @@ func newFakeClient() *fakeClient {
 		runnerTags:      map[string][]string{},
 		deletedProjects: map[string]bool{},
 		removedMembers:  map[string]bool{},
+		blockedUsers:    map[string]bool{},
+		branches:        map[string]domain.Branch{},
+		deletedBranches: map[string]bool{},
 	}
 }
 
@@ -112,6 +118,24 @@ func (f *fakeClient) DeleteProject(_ context.Context, id string) error {
 	return nil
 }
 func (f *fakeClient) ArchiveProject(context.Context, string) error { return nil }
+func (f *fakeClient) ListBranches(_ context.Context, _ string) ([]domain.Branch, error) {
+	branches := make([]domain.Branch, 0, len(f.branches))
+	for _, branch := range f.branches {
+		branches = append(branches, branch)
+	}
+	return branches, nil
+}
+func (f *fakeClient) GetBranch(_ context.Context, _, branchName string) (domain.Branch, error) {
+	branch, ok := f.branches[branchName]
+	if !ok {
+		return domain.Branch{}, provider.NewError(provider.KindNotFound, "get branch", "not found", nil)
+	}
+	return branch, nil
+}
+func (f *fakeClient) DeleteBranch(_ context.Context, projectID, branchName string) error {
+	f.deletedBranches[projectID+"/"+branchName] = true
+	return nil
+}
 func (f *fakeClient) ListGroupMembers(context.Context, domain.Scope) ([]domain.User, error) {
 	return f.members, f.membersErr
 }
@@ -137,7 +161,10 @@ func (f *fakeClient) GetUser(_ context.Context, id string) (domain.User, error) 
 	}
 	return domain.User{}, provider.NewError(provider.KindNotFound, "get user", "not found", nil)
 }
-func (f *fakeClient) BlockUser(context.Context, string) error { return nil }
+func (f *fakeClient) BlockUser(_ context.Context, id string) error {
+	f.blockedUsers[id] = true
+	return nil
+}
 func (f *fakeClient) ListBillableGroupMembers(context.Context, string) (map[string]bool, error) {
 	return f.billable, f.billableErr
 }

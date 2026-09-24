@@ -38,22 +38,27 @@ func writeJSON(t *testing.T, w http.ResponseWriter, v any) {
 
 func TestNormalizeBaseURL(t *testing.T) {
 	tests := []struct {
-		in           string
-		wantAPI      string
-		wantInstance string
-		wantErr      bool
+		in                string
+		allowInsecureHTTP bool
+		wantAPI           string
+		wantInstance      string
+		wantErr           bool
 	}{
-		{"https://gitlab.example.com", "https://gitlab.example.com/api/v4", "https://gitlab.example.com", false},
-		{"https://gitlab.example.com/", "https://gitlab.example.com/api/v4", "https://gitlab.example.com", false},
-		{"https://gitlab.example.com/api/v4", "https://gitlab.example.com/api/v4", "https://gitlab.example.com", false},
-		{"https://gitlab.example.com/api/v4/", "https://gitlab.example.com/api/v4", "https://gitlab.example.com", false},
-		{"gitlab.example.com", "", "", true},
-		{"", "", "", true},
+		{"https://gitlab.example.com", false, "https://gitlab.example.com/api/v4", "https://gitlab.example.com", false},
+		{"https://gitlab.example.com/", false, "https://gitlab.example.com/api/v4", "https://gitlab.example.com", false},
+		{"https://gitlab.example.com/api/v4", false, "https://gitlab.example.com/api/v4", "https://gitlab.example.com", false},
+		{"https://gitlab.example.com/api/v4/", false, "https://gitlab.example.com/api/v4", "https://gitlab.example.com", false},
+		{"http://localhost:8080", false, "http://localhost:8080/api/v4", "http://localhost:8080", false},
+		{"http://127.0.0.1:8080", false, "http://127.0.0.1:8080/api/v4", "http://127.0.0.1:8080", false},
+		{"http://gitlab.remote.com", false, "", "", true},
+		{"http://gitlab.remote.com", true, "http://gitlab.remote.com/api/v4", "http://gitlab.remote.com", false},
+		{"gitlab.example.com", false, "", "", true},
+		{"", false, "", "", true},
 	}
 	for _, tc := range tests {
-		api, instance, err := normalizeBaseURL(tc.in)
+		api, instance, err := normalizeBaseURL(tc.in, tc.allowInsecureHTTP)
 		if (err != nil) != tc.wantErr {
-			t.Errorf("normalizeBaseURL(%q) err = %v, wantErr %v", tc.in, err, tc.wantErr)
+			t.Errorf("normalizeBaseURL(%q, %v) err = %v, wantErr %v", tc.in, tc.allowInsecureHTTP, err, tc.wantErr)
 			continue
 		}
 		if err == nil && (api != tc.wantAPI || instance != tc.wantInstance) {

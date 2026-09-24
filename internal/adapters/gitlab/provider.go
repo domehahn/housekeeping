@@ -42,6 +42,8 @@ func (a *Adapter) Capabilities(ctx context.Context) (provider.Capabilities, erro
 		ListProjects:        provider.SupportSupported,
 		DeleteProjects:      provider.SupportRequiresOwner,
 		ArchiveProjects:     provider.SupportRequiresOwner,
+		ListBranches:        provider.SupportSupported,
+		DeleteBranches:      provider.SupportRequiresDeveloper,
 		ListGroups:          provider.SupportSupported,
 		ListGroupMembers:    provider.SupportSupported,
 		RemoveGroupMember:   provider.SupportRequiresOwner,

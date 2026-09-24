@@ -50,7 +50,38 @@ lint:
 .PHONY: fmt
 fmt:
 	gofmt -l -w .
-	go run golang.org/x/tools/cmd/goimports@latest -l -w . 2>/dev/null || true
+
+.PHONY: fmt-check
+fmt-check:
+	@test -z "$$(gofmt -l .)" || { echo "gofmt formatting needed:"; gofmt -l .; exit 1; }
+
+.PHONY: tidy-check
+tidy-check:
+	go mod tidy
+	@git diff --exit-code go.mod go.sum || { echo "go.mod or go.sum is not tidy"; exit 1; }
+
+.PHONY: vuln-check
+vuln-check:
+	@command -v govulncheck >/dev/null 2>&1 || go install golang.org/x/vuln/cmd/govulncheck@latest
+	govulncheck ./...
+
+.PHONY: checksums
+checksums: build-all
+	@echo "generating SHA-256 checksums..."
+	@cd bin && shasum -a 256 * > SHA256SUMS 2>/dev/null || cd bin && sha256sum * > SHA256SUMS
+
+.PHONY: sbom
+sbom:
+	@echo "generating SBOM..."
+	@mkdir -p bin
+	@command -v syft >/dev/null 2>&1 && syft dir:. -o spdx-json=bin/sbom.spdx.json || echo "syft not installed; skipping SBOM generation"
+
+.PHONY: release
+release: build-all checksums sbom
+	@echo "=== Supply Chain Release Artifacts Ready ==="
+	@echo "Binaries & Checksums: bin/"
+	@echo "To sign release checksums with Cosign:"
+	@echo "  cosign sign-blob --key cosign.key bin/SHA256SUMS"
 
 .PHONY: vet
 vet:
@@ -61,4 +92,5 @@ clean:
 	rm -rf bin/ dist/ coverage.out coverage.html
 
 .PHONY: check
-check: fmt vet test lint
+check: fmt-check tidy-check vet test test-race lint
+

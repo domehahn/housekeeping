@@ -26,10 +26,11 @@ type globalFlags struct {
 	group     string
 	recursive bool
 
-	gitlabURL string
-	tokenEnv  string
-	insecure  bool
-	workers   int
+	gitlabURL         string
+	tokenEnv          string
+	insecure          bool
+	allowInsecureHTTP bool
+	workers           int
 
 	auditLogPath string
 }
@@ -94,6 +95,9 @@ func (e *env) loadConfig() error {
 	if e.flags.insecure {
 		cfg.Provider.GitLab.InsecureSkipTLSVerify = true
 	}
+	if e.flags.allowInsecureHTTP {
+		cfg.Provider.GitLab.AllowInsecureHTTP = true
+	}
 	if e.flags.workers > 0 {
 		cfg.Performance.Workers = e.flags.workers
 	}
@@ -155,10 +159,14 @@ func (e *env) requireClient() (provider.Client, error) {
 }
 
 func (e *env) auditWriter() (audit.Writer, error) {
-	if e.flags.auditLogPath == "" {
+	path := e.flags.auditLogPath
+	if path == "" {
+		path = e.cfg.Audit.Path
+	}
+	if path == "" {
 		return audit.NoopLogger{}, nil
 	}
-	l, err := audit.NewLogger(e.flags.auditLogPath)
+	l, err := audit.NewLogger(path)
 	if err != nil {
 		return nil, exitErr(ExitGeneralError, err)
 	}

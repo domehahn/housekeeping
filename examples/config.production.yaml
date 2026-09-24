@@ -1,0 +1,119 @@
+# Hardened Production Configuration Profile for scm-cleaner
+#
+# Configuration precedence (lowest to highest):
+#   built-in defaults < this file < CLI flags
+#
+# Security & Safety Principles:
+#   1. TLS Enforcement (HTTPS only, insecure_skip_tls_verify false)
+#   2. Mandatory, sync audit logging for all apply runs
+#   3. Strict absolute AND percentage safety guards (fail-closed execution)
+#   4. Double-layer scope & username protections (regex + literal path matching)
+#   5. Maximum plan age (stale plan protection) set to 12 hours
+#   6. Fail-closed handling for unknown user activity
+
+version: 1
+
+provider:
+  type: gitlab
+
+  gitlab:
+    base_url: https://gitlab.example.com
+    token:
+      source: env
+      env: GITLAB_TOKEN
+    insecure_skip_tls_verify: false
+
+scope:
+  group: production-root
+  recursive: true
+
+# --- Audit Logging Configuration -----------------------------------------
+
+audit:
+  required_for_apply: true
+  path: /var/log/scm-cleaner/audit.jsonl
+
+# --- Project Cleanup Policy ----------------------------------------------
+
+projects:
+  inactive:
+    enabled: true
+    days: 90
+
+  archived:
+    enabled: false
+
+  include:
+    - ".*"
+
+  exclude:
+    - "^infrastructure.*"
+
+  protection:
+    paths:
+      - production-root/core-infrastructure
+      - production-root/security-compliance
+    regex:
+      - ".*/production$"
+      - ".*/terraform-state$"
+
+# --- User Cleanup Policy ---------------------------------------------------
+
+users:
+  inactive:
+    enabled: true
+    last_login_days: 60
+    last_activity_days: 60
+    match: all
+
+    ignore_global_activity_if_non_billable_elsewhere: false
+
+  # Fail-closed protection for unknown activity data
+  unknown_activity: skip
+
+  exclude_current_user: true
+
+  protection:
+    usernames:
+      - root
+      - administrator
+      - gitlab-admin
+    regex:
+      - "^svc-"
+      - "^bot-"
+      - "^deploy-"
+    access_levels:
+      - owner
+
+# --- Safety Guards --------------------------------------------------------
+
+safety:
+  # Absolute max actions per execution run
+  max_actions:
+    projects: 5
+    users: 10
+    pipeline_tags: 10
+    runner_tags: 3
+
+  # Maximum percentage of discovered population that can be modified
+  max_percentage:
+    projects: 10
+    users: 5
+    pipeline_tags: 15
+    runner_tags: 10
+
+# --- Execution Behavior --------------------------------------------------
+
+execution:
+  # Always re-check state immediately before mutating resources
+  revalidate: true
+  # Fail fast on the first error to minimize blast radius
+  fail_fast: true
+  # Maximum plan age before requiring re-planning
+  max_plan_age: 12h
+
+performance:
+  workers: 4
+
+output: table
+

@@ -11,11 +11,11 @@ import (
 func TestDoctor_InvalidConfigStopsAtFirstCheck(t *testing.T) {
 	e := testEnv(newFakeClient()) // config.Default() has no base URL or token reference.
 	stdout, _, err := runCmd(newDoctorCmd(e), nil)
-	if err != nil {
-		t.Fatalf("doctor itself must not error, it reports failures in its table: %v", err)
+	if err == nil {
+		t.Fatal("expected doctor to return non-zero exit code when configuration is invalid")
 	}
 	if !strings.Contains(stdout, "Configuration") || !strings.Contains(stdout, "FAILED") {
-		t.Errorf("expected a FAILED Configuration check, got:\n%s", stdout)
+		t.Errorf("expected a FAILED Configuration check in table output, got:\n%s", stdout)
 	}
 }
 

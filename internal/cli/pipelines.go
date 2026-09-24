@@ -5,6 +5,7 @@ import (
 	"maps"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -13,6 +14,7 @@ import (
 	"github.com/domehahn/housekeeping/internal/output"
 	"github.com/domehahn/housekeeping/internal/policy/project"
 	"github.com/domehahn/housekeeping/internal/provider"
+	"github.com/domehahn/housekeeping/pkg/version"
 )
 
 func newPipelinesCmd(e *env) *cobra.Command {
@@ -159,8 +161,16 @@ func newPipelinesPlanCmd(e *env) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			plan.Provenance = &domain.PlanProvenance{
+				ToolVersion:  version.Version,
+				ToolCommit:   version.Commit,
+				ConfigDigest: e.cfg.ComputeConfigDigest(),
+			}
 
-			limits := resolveSafetyLimits(e, maxActions, maxPercentage, domain.ResourceTypePipelineConfig)
+			limits, err := resolveSafetyLimits(e, maxActions, maxPercentage, domain.ResourceTypePipelineConfig)
+			if err != nil {
+				return exitErr(ExitInvalidConfiguration, err)
+			}
 			discovered := map[domain.ResourceType]int{domain.ResourceTypePipelineConfig: summary.Discovered()}
 			plans := []domain.Plan{plan}
 			if batchSize > 0 {
@@ -226,6 +236,8 @@ func evaluateAndBuildPipelinePlan(
 			return app.PipelineTagEvaluationSummary{}, domain.Scope{}, domain.Plan{}, err
 		}
 		plan := app.BuildPipelineTagRenamePlan(info.Provider, info.Instance, scope, summary.Matched(), renames, e.clock)
+		plan.Discovery = map[domain.ResourceType]int{domain.ResourceTypePipelineConfig: summary.Discovered()}
+		plan.ExpiresAt = e.clock.Now().Add(24 * time.Hour)
 		return summary, scope, plan, nil
 	}
 
@@ -238,6 +250,8 @@ func evaluateAndBuildPipelinePlan(
 		return app.PipelineTagEvaluationSummary{}, domain.Scope{}, domain.Plan{}, err
 	}
 	plan := app.BuildPipelineTagPlan(info.Provider, info.Instance, scope, summary.Matched(), normalizedTags, e.clock)
+	plan.Discovery = map[domain.ResourceType]int{domain.ResourceTypePipelineConfig: summary.Discovered()}
+	plan.ExpiresAt = e.clock.Now().Add(24 * time.Hour)
 	return summary, scope, plan, nil
 }
 

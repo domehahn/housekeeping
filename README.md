@@ -1,15 +1,16 @@
 # scm-cleaner
 
 A safe, provider-independent CLI for discovering and cleaning up stale
-projects and users, proposing GitLab CI runner-tag changes through Merge
-Requests, and managing tags on eligible GitLab runners.
+projects, users, and project branches, sending mail to GitLab group members,
+proposing GitLab CI runner-tag changes through Merge Requests, and managing
+tags on eligible GitLab runners.
 GitLab (self-managed and GitLab.com) is fully implemented today; the
 architecture is designed so GitHub, Bitbucket, Azure DevOps, Gitea, and
 Forgejo can be added later without touching business logic.
 
 ## 1. Project description
 
-scm-cleaner discovers projects, direct group members, pipeline configuration,
+scm-cleaner discovers projects, project branches, direct group members, pipeline configuration,
 and available runners within a GitLab group (optionally recursive across
 subgroups). It evaluates them against configurable policies, produces a
 reviewable plan, and executes that plan only after explicit approval. Pipeline
@@ -251,6 +252,24 @@ Fields belonging to another source are invalid: `env` cannot be combined with
 sources, literal token values, unknown YAML fields, missing credentials, and
 empty credentials all fail validation.
 
+Optional SMTP delivery for `users email` is configured separately. SMTP uses
+STARTTLS and sends recipients as BCC; the password is also a secret reference:
+
+```yaml
+email:
+  smtp:
+    host: smtp.example.com
+    port: 587
+    username: housekeeping@example.com
+    password:
+      source: env
+      env: SMTP_PASSWORD
+    from: housekeeping@example.com
+```
+
+The SMTP block is only required when `users email --send` is used. A configured
+username requires the referenced password to be available at runtime.
+
 ## 8. Commands
 
 All examples below use `company/platform` as the target group, assume
@@ -419,10 +438,63 @@ scm-cleaner projects plan \
   --output-plan project-delete.json
 ```
 
-### 8.5 User discovery, evaluation, and plans
+### 8.5 Branch discovery and deletion
+
+Branches are handled separately because the target is one project rather than
+a group-wide project policy. Branch listing is read-only. Branch deletion is
+never performed directly: `branches plan` creates the same reviewable plan
+artifact used by the other destructive operations, and `execute --apply` is
+required to perform the deletion.
+
+Protected and default branches are excluded automatically. Use `--branch` for
+specific branch names or `--merged` to select all merged, non-protected,
+non-default branches. The plan is revalidated immediately before execution so
+branches deleted in the meantime become idempotent no-ops.
+
+| Command/parameter | Required/default | Function |
+|---|---|---|
+| `branches list` | `--project PROJECT` | List branch name, protection, default, merged state, and URL |
+| `branches plan` | `--project PROJECT` plus `--branch` or `--merged` | Create a branch-deletion plan |
+| `--project PROJECT` | Required | Project ID or full project path |
+| `--branch NAME` | Repeatable | Select one or more exact branch names |
+| `--merged` | Optional; `false` | Select all merged, non-protected, non-default branches |
+| `--output-plan FILE` | Optional | Save the plan as JSON for `execute` |
+
+Branch plans use `safety.max_actions.projects` and
+`safety.max_percentage.projects`; for the percentage guard, the denominator
+is the number of branches in the selected project.
+
+```bash
+# List branches:
+scm-cleaner branches list --project company/platform/app
+
+# Plan deletion of named branches:
+scm-cleaner branches plan \
+  --project company/platform/app \
+  --branch 'feature/old-login' \
+  --branch 'experiment/demo' \
+  --output-plan branch-delete.json
+
+# Plan deletion of every merged, unprotected, non-default branch:
+scm-cleaner branches plan \
+  --project company/platform/app \
+  --merged --output-plan merged-branches.json
+
+# Review/simulate first, then explicitly apply:
+scm-cleaner execute merged-branches.json
+scm-cleaner execute merged-branches.json --apply
+```
+
+### 8.6 User discovery, evaluation, and plans
 
 `users list` returns unique users discovered through direct memberships in the
 resolved scope (retaining the first direct membership found for each user).
+`users email` uses the same resolved scope to extract the email addresses that
+GitLab exposes to the authenticated token. It previews recipients by default;
+`--send` is required for delivery and sends one privacy-preserving BCC message
+through the configured SMTP server. GitLab may omit private email addresses for
+non-admin tokens, so members without an exposed address are reported and
+skipped.
 `users evaluate` checks last login and last activity. `--match all` requires
 both configured criteria to match; `--match any` requires either. `users plan`
 supports `report`, `remove-from-group`, and instance-wide `block` actions.
@@ -430,6 +502,7 @@ supports `report`, `remove-from-group`, and instance-wide `block` actions.
 | Command/parameter | Required/default | Function |
 |---|---|---|
 | `users list` | No local parameters | List user, first direct membership/access level, login, and activity |
+| `users email` (alias: `users mail`) | `--subject` and `--body`/`--body-file` | Preview group-member recipients; add `--send` to send the mail |
 | `users evaluate` | Inactivity policy required | Evaluate inactivity/protection without creating a plan |
 | `users plan` | Inactivity policy required | Evaluate and render/save a plan |
 | `--inactive-for DURATION` | Optional | Set both login and activity thresholds, for example `90d` |
@@ -451,6 +524,18 @@ protected usernames/roles, and current-user exclusion are configuration-only.
 # List direct members and their access level/activity data:
 scm-cleaner users list \
   --group company/platform --recursive
+
+# Preview the addresses visible for the group (no mail is sent):
+scm-cleaner users email \
+  --group company/platform --recursive \
+  --subject 'Maintenance announcement' \
+  --body-file maintenance.txt
+
+# Send the same message using email.smtp from the configuration:
+scm-cleaner users email \
+  --group company/platform --recursive \
+  --subject 'Maintenance announcement' \
+  --body-file maintenance.txt --send
 
 # Shorthand: both last login and last activity must be older than 90 days:
 scm-cleaner users evaluate \
@@ -496,7 +581,7 @@ scm-cleaner users evaluate \
   --billable-threshold developer
 ```
 
-### 8.6 Pipeline CI-tag proposals
+### 8.7 Pipeline CI-tag proposals
 
 `pipelines list` reports which projects have `.gitlab-ci.yml`.
 `pipelines evaluate` inspects the repository's root file, `pipelines analyze`
@@ -635,7 +720,7 @@ scm-cleaner execute fix-aks-tag.json
 scm-cleaner execute fix-aks-tag.json --apply
 ```
 
-### 8.7 Runner-tag management
+### 8.8 Runner-tag management
 
 `runners list` reports runners available to in-scope projects, their type,
 tags, explicit out-of-scope assignments, and reach status. `runners evaluate`
@@ -709,7 +794,7 @@ eligible only when its owning group is contained by a recursive scope. Parent-
 group runners inherited by a subgroup, instance runners, and unknown types are
 shown as `blocked` and omitted from plans.
 
-### 8.8 Executing any saved plan
+### 8.9 Executing any saved plan
 
 `execute` accepts plans from all four planners. It validates the plan hash,
 schema version, provider, instance, action limits, and current resource state.
@@ -781,7 +866,7 @@ scm-cleaner execute pipeline-tags.json --apply --non-interactive \
   --auto-merge-if-no-approval-required
 ```
 
-### 8.9 Machine-readable output
+### 8.10 Machine-readable output
 
 Commands that return structured results support table, JSON, and YAML output.
 Table output contains no ANSI color codes and is safe for pipes and CI logs.
@@ -806,7 +891,7 @@ resource as a side effect of discovery, evaluation, or planning; only
 
 ## 10. Plans
 
-`projects plan`, `users plan`, `pipelines plan`, and `runners plan` evaluate
+`projects plan`, `branches plan`, `users plan`, `pipelines plan`, and `runners plan` evaluate
 resources and, with `--output-plan FILE`, write a plan document:
 
 ```json
@@ -907,7 +992,7 @@ Documented exit codes:
 - **Plan integrity**: SHA-256 hash + provider/instance verification (see
   above).
 - **Revalidation** before each destructive call - pipeline protection and
-  the live CI file are checked again; runner scope, project assignments and
+  the live CI file are checked again; branch existence/protection, runner scope, project assignments and
   tag lists are checked again. A changed runner reach or concurrent tag edit
   fails rather than overwriting live state.
 - **Unknown activity is never a match by default** (see below).
@@ -927,6 +1012,16 @@ scm-cleaner execute projects.json --apply   # actually delete
 ```
 
 Actions implemented: `report` (default), `delete`, `archive`.
+
+Branch deletion uses the same plan/execute safety model:
+
+```bash
+scm-cleaner branches plan --project company/sandbox/app --merged \
+  --output-plan merged-branches.json
+scm-cleaner execute merged-branches.json --apply
+```
+
+`branches plan` never selects protected or default branches.
 
 ## 14. User cleanup
 
@@ -1026,6 +1121,8 @@ visible. See [ADR 0003](docs/adr/0003-unknown-activity-safe-default.md).
 | List direct group members | Any token with read access to the group |
 | Remove a direct group member | **Owner** on that specific group (a personal access token with `api` scope is sufficient - "Manage group members" is an Owner-only permission for groups, unlike for projects) |
 | Delete / archive a project | Typically Owner on that project/namespace |
+| List project branches | Any token with read access to the project |
+| Delete a project branch | Typically **Developer** or higher; protected/default branches cannot be deleted by this tool |
 | Read `last_sign_in_at` / `last_activity_on` for other users | **Instance administrator** |
 | Block a user | **Instance administrator** |
 | Delete a user account | **Instance administrator** - not implemented in this tool, see below |

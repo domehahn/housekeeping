@@ -1,6 +1,7 @@
 package app
 
 import (
+	"crypto/ed25519"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -211,6 +212,41 @@ func TestVerifyAgainstInstance(t *testing.T) {
 	}
 	if err := VerifyAgainstInstance(p, "github", "https://gitlab.example.com"); err == nil {
 		t.Error("expected an error: plan must not be executable against a different provider")
+	}
+}
+
+func TestSignAndVerifyPlan(t *testing.T) {
+	pub, priv, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := samplePlan()
+	if err := SignPlan(&p, "key-1", priv); err != nil {
+		t.Fatalf("SignPlan: %v", err)
+	}
+	if p.Signature == nil || p.Signature.Value == "" {
+		t.Fatal("expected signature to be set")
+	}
+	if err := VerifyPlanSignature(p, pub); err != nil {
+		t.Errorf("VerifyPlanSignature failed: %v", err)
+	}
+
+	// Tampering with plan content should invalidate signature
+	p.Instance = "https://tampered.example.com"
+	if err := VerifyPlanSignature(p, pub); err == nil {
+		t.Error("expected signature verification to fail on tampered plan")
+	}
+}
+
+func TestLoadPlan_RejectsExpiredPlan(t *testing.T) {
+	p := samplePlan()
+	p.ExpiresAt = time.Now().Add(-1 * time.Hour)
+	path := filepath.Join(t.TempDir(), "expired-plan.json")
+	if err := SavePlan(path, p); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadPlan(path); err == nil {
+		t.Error("expected expired plan to be rejected")
 	}
 }
 

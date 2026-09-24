@@ -80,6 +80,44 @@ func (a *Adapter) DeleteProject(ctx context.Context, projectID string) error {
 	return classify("delete project "+projectID, err)
 }
 
+// ListBranches lists every branch in a project, handling pagination.
+func (a *Adapter) ListBranches(ctx context.Context, projectID string) ([]domain.Branch, error) {
+	var branches []domain.Branch
+	for page := 1; ; page++ {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		raw, resp, err := a.gl.Branches.ListBranches(projectID, &gitlab.ListBranchesOptions{
+			ListOptions: gitlab.ListOptions{Page: int64(page), PerPage: 100},
+		}, gitlab.WithContext(ctx))
+		if err != nil {
+			return nil, classify("list branches of project "+projectID, err)
+		}
+		for _, b := range raw {
+			branches = append(branches, mapBranch(b))
+		}
+		if resp == nil || resp.NextPage == 0 {
+			return branches, nil
+		}
+	}
+}
+
+// GetBranch fetches one branch by its project ID and name.
+func (a *Adapter) GetBranch(ctx context.Context, projectID, branchName string) (domain.Branch, error) {
+	b, _, err := a.gl.Branches.GetBranch(projectID, branchName, gitlab.WithContext(ctx))
+	if err != nil {
+		return domain.Branch{}, classify("get branch "+branchName+" of project "+projectID, err)
+	}
+	return mapBranch(b), nil
+}
+
+// DeleteBranch deletes one branch. GitLab rejects protected and default
+// branches; the application also filters them during planning and revalidation.
+func (a *Adapter) DeleteBranch(ctx context.Context, projectID, branchName string) error {
+	_, err := a.gl.Branches.DeleteBranch(projectID, branchName, gitlab.WithContext(ctx))
+	return classify("delete branch "+branchName+" of project "+projectID, err)
+}
+
 // ArchiveProject archives a project by its stable numeric ID.
 func (a *Adapter) ArchiveProject(ctx context.Context, projectID string) error {
 	_, _, err := a.gl.Projects.ArchiveProject(projectID, gitlab.WithContext(ctx))

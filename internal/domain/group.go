@@ -12,14 +12,14 @@ type Group struct {
 	ParentID *string
 }
 
-// ScopeType identifies what kind of resource a Scope anchors to. Only
-// "group" is implemented for the GitLab MVP; the type exists so other
-// anchors (organization, project) can be added later without changing
-// call sites that just pass a Scope around.
+// ScopeType identifies what kind of resource a Scope anchors to. Group
+// scopes drive collection-wide policies; project scopes are used for
+// project-local operations such as branch deletion.
 type ScopeType string
 
 const (
-	ScopeTypeGroup ScopeType = "group"
+	ScopeTypeGroup   ScopeType = "group"
+	ScopeTypeProject ScopeType = "project"
 )
 
 // Scope describes the boundary of a discovery/evaluation run in

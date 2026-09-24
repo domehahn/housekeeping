@@ -24,6 +24,8 @@ type Capabilities struct {
 	ListProjects        Support
 	DeleteProjects      Support
 	ArchiveProjects     Support
+	ListBranches        Support
+	DeleteBranches      Support
 	ListGroups          Support
 	ListGroupMembers    Support
 	RemoveGroupMember   Support

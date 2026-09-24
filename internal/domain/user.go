@@ -62,7 +62,10 @@ type User struct {
 	ID       string
 	Username string
 	Name     string
-	State    UserState
+	// Email is populated when the provider exposes the user's address to the
+	// authenticated caller. It may be empty for non-admin GitLab tokens.
+	Email string
+	State UserState
 
 	LastLoginAt    Timestamp
 	LastActivityAt Timestamp

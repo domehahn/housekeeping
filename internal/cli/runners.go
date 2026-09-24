@@ -2,6 +2,7 @@ package cli
 
 import (
 	"fmt"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -9,6 +10,7 @@ import (
 	"github.com/domehahn/housekeeping/internal/domain"
 	"github.com/domehahn/housekeeping/internal/output"
 	"github.com/domehahn/housekeeping/internal/provider"
+	"github.com/domehahn/housekeeping/pkg/version"
 )
 
 func newRunnersCmd(e *env) *cobra.Command {
@@ -151,9 +153,19 @@ func newRunnersPlanCmd(e *env) *cobra.Command {
 				}
 				scope = s
 				plan = app.BuildRunnerTagRenamePlan(info.Provider, info.Instance, scope, summary.Matched(), renames, e.clock)
-
-				limits := resolveSafetyLimits(e, maxActions, maxPercentage, domain.ResourceTypeRunner)
 				discoveredMap := map[domain.ResourceType]int{domain.ResourceTypeRunner: summary.Discovered()}
+				plan.Discovery = discoveredMap
+				plan.ExpiresAt = e.clock.Now().Add(24 * time.Hour)
+				plan.Provenance = &domain.PlanProvenance{
+					ToolVersion:  version.Version,
+					ToolCommit:   version.Commit,
+					ConfigDigest: e.cfg.ComputeConfigDigest(),
+				}
+
+				limits, err := resolveSafetyLimits(e, maxActions, maxPercentage, domain.ResourceTypeRunner)
+				if err != nil {
+					return exitErr(ExitInvalidConfiguration, err)
+				}
 				if violations := app.CheckGuards(plan, discoveredMap, limits); len(violations) > 0 {
 					for _, v := range violations {
 						cmd.PrintErrln("SAFETY GUARD:", v.Error())
@@ -180,9 +192,19 @@ func newRunnersPlanCmd(e *env) *cobra.Command {
 
 			matched := summary.Matched()
 			plan = app.BuildRunnerTagPlan(info.Provider, info.Instance, scope, matched, tag, e.clock)
-
-			limits := resolveSafetyLimits(e, maxActions, maxPercentage, domain.ResourceTypeRunner)
 			discoveredMap := map[domain.ResourceType]int{domain.ResourceTypeRunner: summary.Discovered()}
+			plan.Discovery = discoveredMap
+			plan.ExpiresAt = e.clock.Now().Add(24 * time.Hour)
+			plan.Provenance = &domain.PlanProvenance{
+				ToolVersion:  version.Version,
+				ToolCommit:   version.Commit,
+				ConfigDigest: e.cfg.ComputeConfigDigest(),
+			}
+
+			limits, err := resolveSafetyLimits(e, maxActions, maxPercentage, domain.ResourceTypeRunner)
+			if err != nil {
+				return exitErr(ExitInvalidConfiguration, err)
+			}
 			if violations := app.CheckGuards(plan, discoveredMap, limits); len(violations) > 0 {
 				for _, v := range violations {
 					cmd.PrintErrln("SAFETY GUARD:", v.Error())

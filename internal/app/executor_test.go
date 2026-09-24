@@ -18,11 +18,13 @@ import (
 type fakeExecutor struct {
 	projects map[string]domain.Project
 	users    map[string]domain.User
+	branches map[string]domain.Branch
 
 	deletedProjects  map[string]bool
 	archivedProjects map[string]bool
 	removedMembers   map[string]bool
 	blockedUsers     map[string]bool
+	deletedBranches  map[string]bool
 
 	failDeleteProject string // if set, DeleteProject for this ID returns a generic error
 	currentUserID     string
@@ -55,10 +57,12 @@ func newFakeExecutor() *fakeExecutor {
 	return &fakeExecutor{
 		projects:          map[string]domain.Project{},
 		users:             map[string]domain.User{},
+		branches:          map[string]domain.Branch{},
 		deletedProjects:   map[string]bool{},
 		archivedProjects:  map[string]bool{},
 		removedMembers:    map[string]bool{},
 		blockedUsers:      map[string]bool{},
+		deletedBranches:   map[string]bool{},
 		currentUserID:     "current",
 		ciFiles:           map[string][]byte{},
 		proposedMRs:       map[string][]string{},
@@ -173,6 +177,31 @@ func (f *fakeExecutor) DeleteProject(_ context.Context, id string) error {
 
 func (f *fakeExecutor) ArchiveProject(_ context.Context, id string) error {
 	f.archivedProjects[id] = true
+	return nil
+}
+
+func (f *fakeExecutor) ListBranches(_ context.Context, _ string) ([]domain.Branch, error) {
+	branches := make([]domain.Branch, 0, len(f.branches))
+	for _, branch := range f.branches {
+		branches = append(branches, branch)
+	}
+	return branches, nil
+}
+
+func (f *fakeExecutor) GetBranch(_ context.Context, _, branchName string) (domain.Branch, error) {
+	branch, ok := f.branches[branchName]
+	if !ok {
+		return domain.Branch{}, provider.NewError(provider.KindNotFound, "get branch", "not found", nil)
+	}
+	return branch, nil
+}
+
+func (f *fakeExecutor) DeleteBranch(_ context.Context, projectID, branchName string) error {
+	if _, ok := f.branches[branchName]; !ok {
+		return provider.NewError(provider.KindNotFound, "delete branch", "not found", nil)
+	}
+	f.deletedBranches[projectID+"/"+branchName] = true
+	delete(f.branches, branchName)
 	return nil
 }
 

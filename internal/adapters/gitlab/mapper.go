@@ -48,6 +48,10 @@ func mapGroup(g *gitlab.Group) domain.Group {
 	return group
 }
 
+func mapBranch(b *gitlab.Branch) domain.Branch {
+	return domain.Branch{Name: b.Name, Protected: b.Protected, Merged: b.Merged, Default: b.Default, WebURL: b.WebURL}
+}
+
 // mapGroupMember maps a direct group membership. Activity fields are left
 // Unknown here because the group members API does not return them - they
 // must be filled in separately via enrichWithActivity for callers with
@@ -57,6 +61,7 @@ func mapGroupMember(m *gitlab.GroupMember, groupID string) domain.User {
 		ID:               strconv.FormatInt(m.ID, 10),
 		Username:         m.Username,
 		Name:             m.Name,
+		Email:            firstNonEmpty(m.Email, m.PublicEmail),
 		State:            mapUserState(m.State),
 		AccessLevel:      mapAccessLevel(m.AccessLevel),
 		MembershipOrigin: domain.MembershipDirect,
@@ -65,6 +70,15 @@ func mapGroupMember(m *gitlab.GroupMember, groupID string) domain.User {
 		LastLoginAt:      domain.Unknown(),
 		LastActivityAt:   domain.Unknown(),
 	}
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if value != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 // enrichWithActivity overlays admin-only activity/login fields obtained
@@ -126,6 +140,7 @@ func baseUserFields(u *gitlab.User) domain.User {
 		ID:       strconv.FormatInt(u.ID, 10),
 		Username: u.Username,
 		Name:     u.Name,
+		Email:    u.Email,
 		State:    mapUserState(u.State),
 		WebURL:   u.WebURL,
 	}

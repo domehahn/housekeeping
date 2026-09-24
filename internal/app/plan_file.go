@@ -2,19 +2,23 @@ package app
 
 import (
 	"bytes"
+	"crypto/ed25519"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/domehahn/housekeeping/internal/domain"
 )
 
 // SavePlan writes a plan to disk as indented JSON, computing and embedding
-// its integrity hash first.
+// its integrity hash first. It performs an atomic write using a temporary file
+// in the target directory, syncs to disk, and renames to the target path.
 func SavePlan(path string, plan domain.Plan) error {
 	plan.Hash = ""
 	plan.Hash = computePlanHash(plan)
@@ -23,8 +27,35 @@ func SavePlan(path string, plan domain.Plan) error {
 	if err != nil {
 		return fmt.Errorf("marshal plan: %w", err)
 	}
-	if err := os.WriteFile(path, data, 0o600); err != nil {
-		return fmt.Errorf("write plan file %s: %w", path, err)
+
+	dir := filepath.Dir(path)
+	if dir == "" {
+		dir = "."
+	}
+	tmpFile, err := os.CreateTemp(dir, ".plan-*.tmp")
+	if err != nil {
+		return fmt.Errorf("create temp plan file: %w", err)
+	}
+	tmpName := tmpFile.Name()
+	defer func() {
+		_ = tmpFile.Close()
+		_ = os.Remove(tmpName)
+	}()
+
+	if _, err := tmpFile.Write(data); err != nil {
+		return fmt.Errorf("write temp plan file: %w", err)
+	}
+	if err := tmpFile.Sync(); err != nil {
+		return fmt.Errorf("sync temp plan file: %w", err)
+	}
+	if err := tmpFile.Close(); err != nil {
+		return fmt.Errorf("close temp plan file: %w", err)
+	}
+	if err := os.Chmod(tmpName, 0o600); err != nil {
+		return fmt.Errorf("chmod temp plan file: %w", err)
+	}
+	if err := os.Rename(tmpName, path); err != nil {
+		return fmt.Errorf("atomic rename plan file %s: %w", path, err)
 	}
 	return nil
 }
@@ -67,14 +98,54 @@ func LoadPlan(path string) (domain.Plan, error) {
 	claimed := plan.Hash
 	check := plan
 	check.Hash = ""
+	check.Signature = nil
 	if computePlanHash(check) != claimed {
 		return domain.Plan{}, fmt.Errorf("plan integrity check failed: file has been modified since it was created")
+	}
+
+	if !plan.ExpiresAt.IsZero() && time.Now().After(plan.ExpiresAt) {
+		return domain.Plan{}, fmt.Errorf("plan file has expired at %s", plan.ExpiresAt.Format("2006-01-02T15:04:05Z07:00"))
 	}
 
 	return plan, nil
 }
 
+// SignPlan computes the canonical hash of the plan and signs it using an Ed25519 private key.
+func SignPlan(plan *domain.Plan, keyID string, privateKey []byte) error {
+	plan.Hash = computePlanHash(*plan)
+	sig := ed25519.Sign(ed25519.PrivateKey(privateKey), []byte(plan.Hash))
+	plan.Signature = &domain.PlanSignature{
+		Algorithm: "ed25519",
+		KeyID:     keyID,
+		Value:     hex.EncodeToString(sig),
+	}
+	return nil
+}
+
+// VerifyPlanSignature verifies the plan signature against an Ed25519 public key.
+func VerifyPlanSignature(plan domain.Plan, publicKey []byte) error {
+	if plan.Signature == nil || plan.Signature.Value == "" {
+		return fmt.Errorf("plan signature is missing")
+	}
+	if plan.Signature.Algorithm != "ed25519" {
+		return fmt.Errorf("unsupported signature algorithm %q", plan.Signature.Algorithm)
+	}
+	sigBytes, err := hex.DecodeString(plan.Signature.Value)
+	if err != nil {
+		return fmt.Errorf("invalid signature hex encoding: %w", err)
+	}
+	check := plan
+	check.Hash = ""
+	check.Signature = nil
+	hash := computePlanHash(check)
+	if !ed25519.Verify(ed25519.PublicKey(publicKey), []byte(hash), sigBytes) {
+		return fmt.Errorf("plan signature verification failed")
+	}
+	return nil
+}
+
 // validatePlannedAction checks one action's shape against what its
+
 // resource type/action combination requires. Each resource type has its
 // own small helper so this stays a dispatch table rather than one large
 // function.
@@ -102,6 +173,14 @@ func validateProjectAction(a domain.PlannedAction) error {
 	}
 	switch a.Action {
 	case domain.ActionReport, domain.ActionDeleteProject, domain.ActionArchiveProject:
+		if a.BranchName != "" {
+			return fmt.Errorf("branchName is only valid for delete-branch actions")
+		}
+		return nil
+	case domain.ActionDeleteBranch:
+		if a.BranchName == "" {
+			return fmt.Errorf("delete-branch requires branchName")
+		}
 		return nil
 	default:
 		return fmt.Errorf("action %q is invalid for resource type %q", a.Action, a.ResourceType)
@@ -242,6 +321,7 @@ func VerifyAgainstInstance(plan domain.Plan, providerName, instance string) erro
 // can also recompute the hash.
 func computePlanHash(plan domain.Plan) string {
 	plan.Hash = ""
+	plan.Signature = nil
 	data, err := json.Marshal(plan)
 	if err != nil {
 		return ""

@@ -2,15 +2,20 @@ package cli
 
 import (
 	"fmt"
+	"os"
+	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 
 	"github.com/domehahn/housekeeping/internal/app"
 	"github.com/domehahn/housekeeping/internal/config"
 	"github.com/domehahn/housekeeping/internal/domain"
+	"github.com/domehahn/housekeeping/internal/mailer"
 	"github.com/domehahn/housekeeping/internal/output"
 	"github.com/domehahn/housekeeping/internal/policy/user"
 	"github.com/domehahn/housekeeping/internal/provider"
+	"github.com/domehahn/housekeeping/pkg/version"
 )
 
 type userFlags struct {
@@ -25,7 +30,7 @@ type userFlags struct {
 
 func newUsersCmd(e *env) *cobra.Command {
 	cmd := &cobra.Command{Use: "users", Short: "Discover, evaluate, and plan cleanup of users"}
-	cmd.AddCommand(newUsersListCmd(e), newUsersEvaluateCmd(e), newUsersPlanCmd(e))
+	cmd.AddCommand(newUsersListCmd(e), newUsersEmailCmd(e), newUsersEvaluateCmd(e), newUsersPlanCmd(e))
 	return cmd
 }
 
@@ -54,16 +59,123 @@ func newUsersListCmd(e *env) *cobra.Command {
 
 			rows := make([][]string, 0, len(users))
 			for _, u := range users {
-				rows = append(rows, []string{u.ID, u.Username, string(u.AccessLevel), formatTimestamp(u.LastLoginAt, e.clock), formatTimestamp(u.LastActivityAt, e.clock)})
+				rows = append(rows, []string{u.ID, u.Username, u.Email, string(u.AccessLevel), formatTimestamp(u.LastLoginAt, e.clock), formatTimestamp(u.LastActivityAt, e.clock)})
 			}
 			table := output.Table{
-				Headers: []string{"ID", "Username", "Access Level", "Last Login", "Last Activity"},
+				Headers: []string{"ID", "Username", "Email", "Access Level", "Last Login", "Last Activity"},
 				Rows:    rows,
 				Footer:  fmt.Sprintf("%d user(s) discovered in %s", len(users), scope.Path),
 			}
 			return output.Render(cmd.OutOrStdout(), e.format, table, users)
 		},
 	}
+}
+
+func newUsersEmailCmd(e *env) *cobra.Command {
+	var subject, body, bodyFile string
+	var send bool
+	cmd := &cobra.Command{
+		Use:     "email",
+		Aliases: []string{"mail"},
+		Short:   "Extract group member email addresses and optionally send a mail",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if strings.TrimSpace(subject) == "" {
+				return exitErr(ExitInvalidConfiguration, fmt.Errorf("--subject is required"))
+			}
+			if bodyFile != "" && body != "" {
+				return exitErr(ExitInvalidConfiguration, fmt.Errorf("--body and --body-file are mutually exclusive"))
+			}
+			if bodyFile != "" {
+				data, err := os.ReadFile(bodyFile) //nolint:gosec // explicitly supplied operator path
+				if err != nil {
+					return exitErr(ExitGeneralError, fmt.Errorf("read --body-file: %w", err))
+				}
+				body = string(data)
+			}
+			if strings.TrimSpace(body) == "" {
+				return exitErr(ExitInvalidConfiguration, fmt.Errorf("--body or --body-file is required"))
+			}
+
+			client, err := e.requireClient()
+			if err != nil {
+				return err
+			}
+			group, recursive, err := resolveGroupFlag(e, cmd)
+			if err != nil {
+				return err
+			}
+			scope, err := app.ResolveScope(cmd.Context(), client, group, recursive)
+			if err != nil {
+				return wrapProviderErr(err)
+			}
+			users, err := app.DiscoverUsers(cmd.Context(), client, scope)
+			if err != nil {
+				return wrapProviderErr(err)
+			}
+			recipients := make([]string, 0, len(users))
+			seenRecipients := map[string]bool{}
+			missingEmail := 0
+			rows := make([][]string, 0, len(users))
+			for _, u := range users {
+				status := "skipped: no email exposed"
+				if u.Email != "" {
+					key := strings.ToLower(strings.TrimSpace(u.Email))
+					if !seenRecipients[key] {
+						seenRecipients[key] = true
+						recipients = append(recipients, u.Email)
+						status = "recipient"
+					} else {
+						status = "recipient (duplicate skipped)"
+					}
+				} else {
+					missingEmail++
+				}
+				rows = append(rows, []string{u.Username, u.Email, status})
+			}
+			if send {
+				if len(recipients) == 0 {
+					return exitErr(ExitGeneralError, fmt.Errorf("no group members have an email address exposed by GitLab"))
+				}
+				if err := sendUserEmail(cmd, e, recipients, subject, body); err != nil {
+					return err
+				}
+				cmd.Printf("Mail sent to %d recipient(s); %d member(s) had no exposed email address.\n", len(recipients), missingEmail)
+			}
+			if !send {
+				cmd.Printf("Preview: %d recipient(s); %d member(s) had no exposed email address. Use --send to deliver.\n", len(recipients), missingEmail)
+			}
+			return output.Render(cmd.OutOrStdout(), e.format, output.Table{
+				Headers: []string{"Username", "Email", "Status"}, Rows: rows, Footer: fmt.Sprintf("Scope: %s", scope.Path),
+			}, rows)
+		},
+	}
+	cmd.Flags().StringVar(&subject, "subject", "", "mail subject")
+	cmd.Flags().StringVar(&body, "body", "", "plain-text mail body")
+	cmd.Flags().StringVar(&bodyFile, "body-file", "", "read the plain-text mail body from a file")
+	cmd.Flags().BoolVar(&send, "send", false, "send the mail; without this flag only a recipient preview is produced")
+	return cmd
+}
+
+func sendUserEmail(cmd *cobra.Command, e *env, recipients []string, subject, body string) error {
+	smtpCfg := e.cfg.Email.SMTP
+	if smtpCfg.Host == "" || smtpCfg.Port == 0 || smtpCfg.From == "" {
+		return exitErr(ExitInvalidConfiguration, fmt.Errorf("email.smtp.host, email.smtp.port, and email.smtp.from are required when using --send"))
+	}
+	password := ""
+	if smtpCfg.HasPassword() {
+		ref, err := e.cfg.Email.EmailPasswordReference()
+		if err != nil {
+			return exitErr(ExitInvalidConfiguration, err)
+		}
+		password, err = e.secretResolver.Resolve(cmd.Context(), ref)
+		if err != nil {
+			return exitErr(ExitAuthenticationError, fmt.Errorf("resolve SMTP password: %w", err))
+		}
+	}
+	if err := (mailer.SMTP{}).Send(cmd.Context(), smtpCfg, password, recipients, subject, body); err != nil {
+		return exitErr(ExitGeneralError, err)
+	}
+	return nil
 }
 
 func newUsersEvaluateCmd(e *env) *cobra.Command {
@@ -116,9 +228,19 @@ func newUsersPlanCmd(e *env) *cobra.Command {
 
 			matched := summary.Matched()
 			plan := app.BuildUserPlan(info.Provider, info.Instance, scope, matched, action, e.clock)
-
-			limits := resolveSafetyLimits(e, maxActions, maxPercentage, domain.ResourceTypeUser)
 			discovered := map[domain.ResourceType]int{domain.ResourceTypeUser: summary.Discovered()}
+			plan.Discovery = discovered
+			plan.ExpiresAt = e.clock.Now().Add(24 * time.Hour)
+			plan.Provenance = &domain.PlanProvenance{
+				ToolVersion:  version.Version,
+				ToolCommit:   version.Commit,
+				ConfigDigest: e.cfg.ComputeConfigDigest(),
+			}
+
+			limits, err := resolveSafetyLimits(e, maxActions, maxPercentage, domain.ResourceTypeUser)
+			if err != nil {
+				return exitErr(ExitInvalidConfiguration, err)
+			}
 			if violations := app.CheckGuards(plan, discovered, limits); len(violations) > 0 {
 				for _, v := range violations {
 					cmd.PrintErrln("SAFETY GUARD:", v.Error())

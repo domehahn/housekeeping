@@ -2,6 +2,7 @@ package cli
 
 import (
 	"fmt"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -11,6 +12,7 @@ import (
 	"github.com/domehahn/housekeeping/internal/output"
 	"github.com/domehahn/housekeeping/internal/policy/project"
 	"github.com/domehahn/housekeeping/internal/provider"
+	"github.com/domehahn/housekeeping/pkg/version"
 )
 
 // projectFlags are the flags shared by `projects evaluate` and
@@ -122,9 +124,19 @@ func newProjectsPlanCmd(e *env) *cobra.Command {
 
 			matched := summary.Matched()
 			plan := app.BuildProjectPlan(info.Provider, info.Instance, scope, matched, action, e.clock)
-
-			limits := resolveSafetyLimits(e, maxActions, maxPercentage, domain.ResourceTypeProject)
 			discovered := map[domain.ResourceType]int{domain.ResourceTypeProject: summary.Discovered()}
+			plan.Discovery = discovered
+			plan.ExpiresAt = e.clock.Now().Add(24 * time.Hour)
+			plan.Provenance = &domain.PlanProvenance{
+				ToolVersion:  version.Version,
+				ToolCommit:   version.Commit,
+				ConfigDigest: e.cfg.ComputeConfigDigest(),
+			}
+
+			limits, err := resolveSafetyLimits(e, maxActions, maxPercentage, domain.ResourceTypeProject)
+			if err != nil {
+				return exitErr(ExitInvalidConfiguration, err)
+			}
 			if violations := app.CheckGuards(plan, discovered, limits); len(violations) > 0 {
 				for _, v := range violations {
 					cmd.PrintErrln("SAFETY GUARD:", v.Error())

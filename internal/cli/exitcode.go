@@ -17,6 +17,8 @@ const (
 	ExitSafetyGuardTriggered = 5
 	ExitPartialExecution     = 6
 	ExitPlanValidationFailed = 7
+	ExitStalePlan            = 8
+	ExitConfigDrift          = 9
 )
 
 // ExitError carries an explicit exit code alongside its message so command

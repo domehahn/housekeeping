@@ -92,6 +92,8 @@ func newProviderCapabilitiesCmd(e *env) *cobra.Command {
 					{"List Projects", string(caps.ListProjects)},
 					{"Delete Projects", string(caps.DeleteProjects)},
 					{"Archive Projects", string(caps.ArchiveProjects)},
+					{"List Branches", string(caps.ListBranches)},
+					{"Delete Branches", string(caps.DeleteBranches)},
 					{"List Groups", string(caps.ListGroups)},
 					{"List Group Members", string(caps.ListGroupMembers)},
 					{"Remove Group Member", string(caps.RemoveGroupMember)},

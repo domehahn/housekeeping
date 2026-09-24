@@ -55,6 +55,7 @@ func newWithGitLabBuilder(ctx context.Context, cfg config.Config, resolver secre
 			BaseURL:               cfg.Provider.GitLab.BaseURL,
 			Token:                 token,
 			InsecureSkipTLSVerify: cfg.Provider.GitLab.InsecureSkipTLSVerify,
+			AllowInsecureHTTP:     cfg.Provider.GitLab.AllowInsecureHTTP,
 			Workers:               cfg.Performance.Workers,
 		})
 		if err != nil {

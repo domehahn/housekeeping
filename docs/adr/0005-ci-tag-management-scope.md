@@ -155,11 +155,11 @@ operator never intended to touch.
   in-scope project. A group runner is plannable only when its owning group is
   inside a recursively resolved scope. An inherited ancestor-group runner,
   instance runner, or unknown type fails closed and is shown as `blocked`.
-- `execute --apply` refuses to run a plan containing any runner-tag action
-  with a non-zero out-of-scope impact unless
-  `--confirm-out-of-scope-impact=<N>` is passed, where N must exactly
-  equal the plan's total out-of-scope project count. This applies in both
-  interactive and non-interactive contexts (unlike `--confirm-scope`,
+- `execute --apply` refuses to run a plan containing any mutating runner action
+  (including `ActionAddRunnerTag` and `ActionReplaceRunnerTag`) with a non-zero
+  out-of-scope impact unless `--confirm-out-of-scope-impact=<N>` is passed,
+  where N must exactly equal the plan's total out-of-scope project count. This
+  applies in both interactive and non-interactive contexts (unlike `--confirm-scope`,
   which is a non-interactive-only guard) - the risk of affecting an
   unrelated project's pipeline is independent of how the command happens
   to be invoked.

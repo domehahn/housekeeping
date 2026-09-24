@@ -6,16 +6,17 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 
 	"github.com/domehahn/housekeeping/internal/app"
-	"github.com/domehahn/housekeeping/internal/audit"
 	"github.com/domehahn/housekeeping/internal/domain"
 	"github.com/domehahn/housekeeping/internal/output"
 	projectpolicy "github.com/domehahn/housekeeping/internal/policy/project"
 	userpolicy "github.com/domehahn/housekeeping/internal/policy/user"
 	"github.com/domehahn/housekeeping/internal/provider"
+	"github.com/domehahn/housekeeping/pkg/version"
 )
 
 // executeFlags holds every flag `execute` accepts.
@@ -26,6 +27,8 @@ type executeFlags struct {
 	maxActions, maxPercentage     int
 	confirmOutOfScopeImpact       int
 	autoMergeIfNoApprovalRequired bool
+	allowStalePlan                string
+	confirmInstanceWideUserBlock  bool
 }
 
 func newExecuteCmd(e *env) *cobra.Command {
@@ -35,7 +38,7 @@ func newExecuteCmd(e *env) *cobra.Command {
 		Use:   "execute <plan-file>",
 		Short: "Simulate (default) or apply (--apply) any saved plan",
 		Args:  cobra.ExactArgs(1),
-		Long: `execute reads a plan file produced by "projects plan", "users plan",
+		Long: `execute reads a plan file produced by "projects plan", "branches plan", "users plan",
 "pipelines plan", or "runners plan" and carries out its actions.
 
 Without --apply, every action is only simulated: nothing is changed. This
@@ -68,6 +71,9 @@ can be handed to approvers (e.g. pasted into a Teams channel).`,
 		"required, and must exactly equal the plan's explicit out-of-scope project assignments, when a runner-tag action has such assignments")
 	cmd.Flags().BoolVar(&flags.autoMergeIfNoApprovalRequired, "auto-merge-if-no-approval-required", false,
 		"merge a pipeline-tag Merge Request immediately if its project requires zero approvals (waits for its pipeline to succeed); Merge Requests needing approval are reported instead")
+	cmd.Flags().StringVar(&flags.allowStalePlan, "allow-stale-plan", "", "emergency override for executing a stale plan; must match the plan's exact hash")
+	cmd.Flags().BoolVar(&flags.confirmInstanceWideUserBlock, "confirm-instance-wide-user-block", false,
+		"required explicit acknowledgement when applying a plan that contains instance-wide user block actions")
 	return cmd
 }
 
@@ -75,6 +81,26 @@ func runExecute(cmd *cobra.Command, e *env, planPath string, flags *executeFlags
 	plan, err := app.LoadPlan(planPath)
 	if err != nil {
 		return exitErr(ExitPlanValidationFailed, err)
+	}
+
+	// Check plan freshness / stale plan
+	maxAge := e.cfg.Execution.MaxPlanAge
+	if maxAge <= 0 {
+		maxAge = 24 * time.Hour
+	}
+	planAge := e.clock.Now().Sub(plan.CreatedAt)
+	if planAge > maxAge || plan.IsExpired(e.clock.Now()) {
+		if flags.allowStalePlan == "" || flags.allowStalePlan != plan.Hash {
+			return exitErr(ExitStalePlan, fmt.Errorf("plan is stale (created %s ago at %s, maximum allowed plan age is %s); regenerate the plan or pass --allow-stale-plan=%s to force execution", planAge.Truncate(time.Second), plan.CreatedAt.Format(time.RFC3339), maxAge, plan.Hash))
+		}
+	}
+
+	// Check configuration digest integrity
+	if plan.Provenance != nil && plan.Provenance.ConfigDigest != "" {
+		currentConfigDigest := e.cfg.ComputeConfigDigest()
+		if currentConfigDigest != plan.Provenance.ConfigDigest {
+			return exitErr(ExitConfigDrift, fmt.Errorf("safety-relevant configuration changed since plan creation (plan digest %s, current %s); regenerate the plan before executing", plan.Provenance.ConfigDigest, currentConfigDigest))
+		}
 	}
 
 	client, err := e.requireClient()
@@ -90,7 +116,7 @@ func runExecute(cmd *cobra.Command, e *env, planPath string, flags *executeFlags
 		return exitErr(ExitPlanValidationFailed, err)
 	}
 
-	if err := checkExecuteSafetyGuards(cmd, e, plan, flags); err != nil {
+	if err := checkExecuteSafetyGuards(cmd, e, ctx, client, plan, flags); err != nil {
 		return err
 	}
 
@@ -100,7 +126,7 @@ func runExecute(cmd *cobra.Command, e *env, planPath string, flags *executeFlags
 				return err
 			}
 		}
-		if err := confirmApply(cmd, plan, flags.nonInteractive, flags.confirmScope); err != nil {
+		if err := confirmApply(cmd, plan, flags.nonInteractive, flags.confirmScope, flags.confirmInstanceWideUserBlock); err != nil {
 			return err
 		}
 	} else {
@@ -110,28 +136,62 @@ func runExecute(cmd *cobra.Command, e *env, planPath string, flags *executeFlags
 	return runAndReportExecution(cmd, e, ctx, client, plan, flags)
 }
 
-// checkExecuteSafetyGuards re-checks the absolute max-actions guard
-// against the plan's own action counts. The percentage guard needs a
-// "discovered" total that a plan file alone does not carry (that check
-// already ran, against the real total, when the plan was created), so it
-// is deliberately disabled here.
-func checkExecuteSafetyGuards(cmd *cobra.Command, e *env, plan domain.Plan, flags *executeFlags) error {
-	limits := resolveSafetyLimits(e, flags.maxActions, flags.maxPercentage, resourceMajority(plan))
-	for rt, l := range limits.Limits {
-		l.MaxPercentage = 0
-		limits.Limits[rt] = l
+// checkExecuteSafetyGuards re-checks both absolute max-actions and percentage guards
+// against the plan's action counts, embedded discovery metadata, and live rediscovered population.
+func checkExecuteSafetyGuards(cmd *cobra.Command, e *env, ctx context.Context, client provider.Client, plan domain.Plan, flags *executeFlags) error {
+	limits, err := resolvePlanSafetyLimits(e, flags.maxActions, flags.maxPercentage, plan)
+	if err != nil {
+		return exitErr(ExitInvalidConfiguration, err)
 	}
-	violations := app.CheckGuards(plan, nil, limits)
+
+	// 1. Evaluate against stored plan discovery snapshot
+	violations := app.CheckGuards(plan, plan.Discovery, limits)
+
+	// 2. Perform live population rediscovery if client is available
+	presentTypes := map[domain.ResourceType]bool{}
+	for _, a := range plan.Actions {
+		presentTypes[a.ResourceType] = true
+	}
+	var rTypes []domain.ResourceType
+	for rt := range presentTypes {
+		rTypes = append(rTypes, rt)
+	}
+
+	if client != nil && len(rTypes) > 0 {
+		liveDiscovery, rediscoveryErr := app.RediscoverScopePopulation(ctx, client, plan.Scope.Scope(), rTypes)
+		if rediscoveryErr != nil {
+			// Fail closed if any resource type in the plan has a percentage guard enabled
+			for _, rt := range rTypes {
+				if limits.Limit(rt).MaxPercentage > 0 {
+					cmd.PrintErrln("SAFETY GUARD ERROR: live population rediscovery failed:", rediscoveryErr)
+					return exitErr(ExitSafetyGuardTriggered, fmt.Errorf("cannot evaluate live percentage guard because scope population rediscovery failed: %w", rediscoveryErr))
+				}
+			}
+		} else {
+			// Evaluate against live population
+			liveViolations := app.CheckGuards(plan, liveDiscovery, limits)
+			violations = append(violations, liveViolations...)
+		}
+	}
+
 	if len(violations) == 0 {
 		return nil
 	}
+	seenMsg := map[string]bool{}
 	for _, v := range violations {
-		cmd.PrintErrln("SAFETY GUARD:", v.Error())
+		if !seenMsg[v.Error()] {
+			seenMsg[v.Error()] = true
+			cmd.PrintErrln("SAFETY GUARD:", v.Error())
+		}
 	}
-	return exitErr(ExitSafetyGuardTriggered, fmt.Errorf("plan exceeds configured maximum action count"))
+	return exitErr(ExitSafetyGuardTriggered, fmt.Errorf("plan exceeds configured safety guards"))
 }
 
 func runAndReportExecution(cmd *cobra.Command, e *env, ctx context.Context, client provider.Client, plan domain.Plan, flags *executeFlags) error {
+	if flags.apply && e.cfg.Audit.RequiredForApply && e.flags.auditLogPath == "" && e.cfg.Audit.Path == "" {
+		return exitErr(ExitInvalidConfiguration, fmt.Errorf("audit log is required for --apply execution (set audit.required_for_apply or pass --audit-log)"))
+	}
+
 	auditLog, err := e.auditWriter()
 	if err != nil {
 		return err
@@ -153,6 +213,12 @@ func runAndReportExecution(cmd *cobra.Command, e *env, ctx context.Context, clie
 		return exitErr(ExitInvalidConfiguration, err)
 	}
 
+	runID := fmt.Sprintf("run-%d", e.clock.Now().UnixNano())
+	actor := ""
+	if me, err := client.CurrentUser(ctx); err == nil {
+		actor = me.Username
+	}
+
 	summary := app.Execute(ctx, client, plan, app.ExecuteOptions{
 		Apply:                         flags.apply,
 		Revalidate:                    e.cfg.Execution.Revalidate,
@@ -160,15 +226,14 @@ func runAndReportExecution(cmd *cobra.Command, e *env, ctx context.Context, clie
 		ProjectProtection:             projectProtection,
 		UserProtection:                userProtection,
 		AutoMergeIfNoApprovalRequired: flags.autoMergeIfNoApprovalRequired,
+		AuditWriter:                   auditLog,
+		RunID:                         runID,
+		ConfigDigest:                  e.cfg.ComputeConfigDigest(),
+		ToolVersion:                   version.Version,
+		ToolCommit:                    version.Commit,
+		AuthenticatedActor:            actor,
 	})
 
-	for _, o := range summary.Outcomes {
-		rec := audit.FromOutcome(e.clock.Now(), plan.Provider, plan.Instance, plan.Scope.Path, o)
-		if err := auditLog.Write(rec); err != nil {
-			_ = auditLog.Close()
-			return exitErr(ExitGeneralError, err)
-		}
-	}
 	if err := auditLog.Close(); err != nil {
 		return exitErr(ExitGeneralError, fmt.Errorf("close audit log: %w", err))
 	}
@@ -207,15 +272,12 @@ func resourceMajority(plan domain.Plan) domain.ResourceType {
 	return best
 }
 
-// totalOutOfScopeImpact sums OutOfScopeProjectCount across every
-// ActionAddRunnerTag in the plan - the number of explicit project assignments
-// outside the scope that was actually evaluated.
+// totalOutOfScopeImpact sums out-of-scope impact across every mutating runner action
+// in the plan.
 func totalOutOfScopeImpact(plan domain.Plan) int {
 	total := 0
 	for _, a := range plan.Actions {
-		if a.Action == domain.ActionAddRunnerTag {
-			total += a.OutOfScopeProjectCount
-		}
+		total += a.OutOfScopeImpact()
 	}
 	return total
 }
@@ -238,13 +300,19 @@ func confirmOutOfScopeImpact(cmd *cobra.Command, plan domain.Plan, total, confir
 	return nil
 }
 
-// outOfScopeProjectPaths collects every out-of-scope project path across
-// every ActionAddRunnerTag in the plan.
+// outOfScopeProjectPaths collects every unique out-of-scope project path across
+// every mutating runner action in the plan.
 func outOfScopeProjectPaths(plan domain.Plan) []string {
 	var paths []string
+	seen := map[string]bool{}
 	for _, a := range plan.Actions {
-		if a.Action == domain.ActionAddRunnerTag {
-			paths = append(paths, a.OutOfScopeProjectPaths...)
+		if a.OutOfScopeImpact() > 0 {
+			for _, p := range a.OutOfScopeProjectPaths {
+				if !seen[p] {
+					seen[p] = true
+					paths = append(paths, p)
+				}
+			}
 		}
 	}
 	return paths
@@ -252,7 +320,14 @@ func outOfScopeProjectPaths(plan domain.Plan) []string {
 
 // confirmApply enforces the interactive/non-interactive confirmation
 // requirements before any destructive call is made.
-func confirmApply(cmd *cobra.Command, plan domain.Plan, nonInteractive bool, confirmScope string) error {
+func confirmApply(cmd *cobra.Command, plan domain.Plan, nonInteractive bool, confirmScope string, confirmInstanceWideUserBlock bool) error {
+	userBlockCount := 0
+	for _, a := range plan.Actions {
+		if a.Action == domain.ActionBlockUser {
+			userBlockCount++
+		}
+	}
+
 	interactive := !nonInteractive && isTerminal(os.Stdin)
 
 	if !interactive {
@@ -261,6 +336,9 @@ func confirmApply(cmd *cobra.Command, plan domain.Plan, nonInteractive bool, con
 		}
 		if confirmScope != plan.Scope.Path {
 			return exitErr(ExitGeneralError, fmt.Errorf("--confirm-scope %q does not match plan scope %q", confirmScope, plan.Scope.Path))
+		}
+		if userBlockCount > 0 && !confirmInstanceWideUserBlock {
+			return exitErr(ExitGeneralError, fmt.Errorf("--apply in a non-interactive context with user block action(s) requires --confirm-instance-wide-user-block"))
 		}
 		return nil
 	}
@@ -276,9 +354,20 @@ func confirmApply(cmd *cobra.Command, plan domain.Plan, nonInteractive bool, con
 		}
 		cmd.Println()
 	}
+	if userBlockCount > 0 {
+		cmd.Printf("WARNING: This plan contains %d instance-wide user block action(s).\n", userBlockCount)
+		cmd.Println("Blocked users will lose access across ALL projects in the instance.")
+		cmd.Println()
+	}
 	cmd.Println("This operation may be irreversible.")
 	cmd.Println()
-	phrase := fmt.Sprintf("apply %d actions", len(plan.Actions))
+
+	var phrase string
+	if userBlockCount > 0 {
+		phrase = fmt.Sprintf("block %d users instance-wide", userBlockCount)
+	} else {
+		phrase = fmt.Sprintf("apply %d actions", len(plan.Actions))
+	}
 	cmd.Printf("Type %q to continue: ", phrase)
 
 	reader := bufio.NewReader(os.Stdin)

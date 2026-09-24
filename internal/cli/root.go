@@ -63,6 +63,7 @@ func newRootCmd() (*cobra.Command, *env) {
 	pf.StringVar(&flags.gitlabURL, "gitlab-url", "", "GitLab base URL, overrides config")
 	pf.StringVar(&flags.tokenEnv, "token-env", "", "environment variable holding the GitLab token, overrides config")
 	pf.BoolVar(&flags.insecure, "insecure-skip-tls-verify", false, "DANGEROUS: disable TLS certificate verification")
+	pf.BoolVar(&flags.allowInsecureHTTP, "allow-insecure-http", false, "allow plain unencrypted http:// connections to non-localhost hosts")
 	pf.IntVar(&flags.workers, "workers", 0, "bounded concurrency for read operations, overrides config")
 	pf.StringVar(&flags.auditLogPath, "audit-log", "", "append destructive-operation records to this JSON Lines file")
 
@@ -70,6 +71,7 @@ func newRootCmd() (*cobra.Command, *env) {
 		newVersionCmd(),
 		newProviderCmd(e),
 		newProjectsCmd(e),
+		newBranchesCmd(e),
 		newUsersCmd(e),
 		newPipelinesCmd(e),
 		newRunnersCmd(e),

@@ -1,0 +1,22 @@
+# CODEOWNERS for scm-cleaner (domehahn/housekeeping)
+# Explicit code ownership for critical security and safety components.
+
+# CI/CD and Container Build Security
+.gitlab-ci.yml                 @domehahn
+Dockerfile                     @domehahn
+Makefile                       @domehahn
+
+# Core Safety, Execution Engine, and Plan Serialization
+/internal/app/                 @domehahn
+/internal/policy/              @domehahn
+/internal/domain/              @domehahn
+
+# Cryptography, Secrets, and Audit Trail Security
+/internal/secrets/             @domehahn
+/internal/audit/               @domehahn
+/internal/config/              @domehahn
+
+# CLI Entrypoint and Command Execution Controls
+/cmd/                          @domehahn
+/internal/cli/                 @domehahn
+

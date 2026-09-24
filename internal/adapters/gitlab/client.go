@@ -14,6 +14,7 @@ import (
 	"crypto/tls"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -31,6 +32,8 @@ type Options struct {
 	// explicitly requested by the caller; defaults to false everywhere in
 	// this codebase.
 	InsecureSkipTLSVerify bool
+	// AllowInsecureHTTP permits plain http:// connections to non-localhost hosts.
+	AllowInsecureHTTP bool
 	// Workers bounds concurrency for read operations that fan out across
 	// many resources (e.g. fetching per-user admin details).
 	Workers int
@@ -55,7 +58,7 @@ func New(opts Options) (*Adapter, error) {
 	if opts.Token == "" {
 		return nil, fmt.Errorf("gitlab: token must not be empty")
 	}
-	baseURL, instance, err := normalizeBaseURL(opts.BaseURL)
+	baseURL, instance, err := normalizeBaseURL(opts.BaseURL, opts.AllowInsecureHTTP)
 	if err != nil {
 		return nil, err
 	}
@@ -95,16 +98,26 @@ func New(opts Options) (*Adapter, error) {
 // the API base URL the SDK expects plus the canonical instance URL used for
 // plan-integrity comparisons (always the bare instance root, no trailing
 // slash, no /api/v4 suffix).
-func normalizeBaseURL(raw string) (apiBaseURL, instance string, err error) {
+func normalizeBaseURL(raw string, allowInsecureHTTP bool) (apiBaseURL, instance string, err error) {
 	if raw == "" {
 		return "", "", fmt.Errorf("gitlab: base_url must not be empty")
 	}
+	u, err := url.Parse(raw)
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return "", "", fmt.Errorf("gitlab: base_url must include a scheme and host: %q", raw)
+	}
+	scheme := strings.ToLower(u.Scheme)
+	if scheme != "http" && scheme != "https" {
+		return "", "", fmt.Errorf("gitlab: base_url scheme must be http or https: %q", raw)
+	}
+	hostname := strings.ToLower(u.Hostname())
+	if scheme == "http" && !allowInsecureHTTP && hostname != "localhost" && hostname != "127.0.0.1" && hostname != "::1" {
+		return "", "", fmt.Errorf("gitlab: plain http:// is disallowed for remote host %q; use https:// or pass --allow-insecure-http", u.Host)
+	}
+
 	trimmed := strings.TrimRight(raw, "/")
 	instance = strings.TrimSuffix(trimmed, "/api/v4")
 	instance = strings.TrimRight(instance, "/")
-	if !strings.HasPrefix(instance, "http://") && !strings.HasPrefix(instance, "https://") {
-		return "", "", fmt.Errorf("gitlab: base_url must include a scheme (http:// or https://): %q", raw)
-	}
 	return instance + "/api/v4", instance, nil
 }
 
