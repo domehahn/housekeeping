@@ -10,19 +10,20 @@
    `domain.FixedClock` and table-driven cases, never `time.Now()`. Adapter
    changes should be tested against `httptest.Server`, never a live GitLab
    instance.
-4. Run the full check suite before opening a merge request:
+4. Run the full check suite before opening a pull request:
 
    ```bash
-   make fmt
+   make fmt-check
    make vet
    make test
    make test-race
    make lint   # requires golangci-lint installed locally
+   make vuln-check
    ```
 
-5. Open a merge request describing the change and, if it affects behavior
+5. Open a pull request describing the change and, if it affects behavior
    an operator would notice, update the README and/or
-   `docs/architecture.md`.
+   `docs/architecture.md`. Complete the pull request checklist.
 
 ## Design constraints (please read before large changes)
 
@@ -60,7 +61,4 @@ the `internal/provider` interfaces you can support in a new
 
 ## Reporting security issues
 
-Please do not open a public issue for a security vulnerability. See the
-Security Considerations section of the README for the threat model this
-project already accounts for, and describe how your finding falls outside
-it when reporting privately.
+Please do not open a public issue for a security vulnerability. See [SECURITY.md](SECURITY.md) and [docs/threat-model.md](docs/threat-model.md) for reporting guidelines and our security threat model.

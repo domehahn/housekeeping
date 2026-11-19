@@ -1,12 +1,66 @@
 # scm-cleaner
 
+[![CI](https://github.com/domehahn/housekeeping/actions/workflows/ci.yml/badge.svg)](https://github.com/domehahn/housekeeping/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/domehahn/housekeeping?logo=github&color=blue)](https://github.com/domehahn/housekeeping/releases)
+[![Go Version](https://img.shields.io/github/go-mod/go-version/domehahn/housekeeping?logo=go)](https://go.dev)
+[![Go Report Card](https://goreportcard.com/badge/github.com/domehahn/housekeeping)](https://goreportcard.com/report/github.com/domehahn/housekeeping)
+[![License](https://img.shields.io/github/license/domehahn/housekeeping)](LICENSE)
+[![Security Policy](https://img.shields.io/badge/security-threat%20model-success)](docs/threat-model.md)
+
 A safe, provider-independent CLI for discovering and cleaning up stale
 projects, users, and project branches, sending mail to GitLab group members,
 proposing GitLab CI runner-tag changes through Merge Requests, and managing
 tags on eligible GitLab runners.
+
 GitLab (self-managed and GitLab.com) is fully implemented today; the
 architecture is designed so GitHub, Bitbucket, Azure DevOps, Gitea, and
 Forgejo can be added later without touching business logic.
+
+---
+
+### Key Features & Guarantees
+
+- 🛡️ **Safe by Default:** Every destructive action requires explicit two-phase confirmation (`evaluate` &rarr; `plan` &rarr; `review` &rarr; `execute`).
+- 🔐 **Zero Credential Leaks:** Tokens resolved strictly from chosen environment variables or native OS keychains; never stored in configs, plans, or logs.
+- 📐 **Hexagonal Provider Architecture:** Pure domain & policy logic completely decoupled from provider APIs.
+- 🚦 **Fail-Closed Unknowns:** Missing or incomplete provider data is treated as unknown activity and never assumed safe to delete.
+- 🏷️ **Safe CI & Runner Tagging:** Proposes pipeline tag changes via Merge Requests and checks runner blast radius before retiring tags.
+
+---
+
+<details>
+<summary><strong>Table of Contents</strong> (click to expand)</summary>
+
+1. [Project description](#1-project-description)
+2. [Motivation](#2-motivation)
+3. [Architecture](#3-architecture)
+4. [Installation](#4-installation)
+5. [Quick start](#5-quick-start)
+6. [GitLab authentication](#6-gitlab-authentication)
+7. [Configuration](#7-configuration)
+8. [Commands](#8-commands)
+9. [Dry run](#9-dry-run)
+10. [Plans](#10-plans)
+11. [Execution](#11-execution)
+12. [Safety guards](#12-safety-guards)
+13. [Project cleanup](#13-project-cleanup)
+14. [User cleanup](#14-user-cleanup)
+15. [Last login vs. last activity](#15-last-login-vs-last-activity)
+16. [Unknown activity](#16-unknown-activity)
+17. [Permissions](#17-permissions)
+18. [Provider architecture](#18-provider-architecture)
+19. [GitLab adapter](#19-gitlab-adapter)
+20. [Adding another provider](#20-adding-another-provider)
+21. [Testing](#21-testing)
+22. [Security considerations](#22-security-considerations)
+23. [Limitations](#23-limitations)
+24. [Pipeline tag cleanup](#24-pipeline-tag-cleanup)
+25. [Runner tag cleanup](#25-runner-tag-cleanup)
+26. [Roadmap](#26-roadmap)
+
+</details>
+
+---
 
 ## 1. Project description
 

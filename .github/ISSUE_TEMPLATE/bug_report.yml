@@ -1,0 +1,66 @@
+name: Bug Report
+description: Report a defect, error, or unexpected behavior in scm-cleaner
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report an issue! Please check existing issues before submitting.
+  - type: input
+    id: version
+    attributes:
+      label: scm-cleaner Version
+      description: Run `scm-cleaner version` or specify Git commit / release tag.
+      placeholder: "e.g., v0.7.0"
+    validations:
+      required: true
+  - type: dropdown
+    id: provider
+    attributes:
+      label: SCM Provider
+      description: Which provider were you targeting?
+      options:
+        - GitLab (self-managed)
+        - GitLab.com
+        - Other
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: Environment & OS
+      description: Operating system and architecture.
+      placeholder: "e.g., macOS Sonoma (arm64), Ubuntu 24.04 (amd64)"
+    validations:
+      required: true
+  - type: textarea
+    id: description
+    attributes:
+      label: Describe the Bug
+      description: A clear and concise description of what happened.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Steps to Reproduce
+      description: CLI command or configuration used (please redact sensitive tokens and URLs!).
+      placeholder: |
+        1. Run `scm-cleaner projects evaluate --group ...`
+        2. See error ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected Behavior
+      description: What did you expect to happen instead?
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant Log Output or Stack Trace
+      description: Please copy and paste any relevant output with `--verbose` or `--debug`. Redact any tokens or secrets!
+      render: shell
