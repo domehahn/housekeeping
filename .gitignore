@@ -1,8 +1,6 @@
+/target/
 /bin/
 /dist/
-*.test
-coverage.out
-coverage.html
 *.jsonl
 *-plan.json
 .DS_Store

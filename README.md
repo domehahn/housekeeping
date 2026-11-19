@@ -1,9 +1,8 @@
 # scm-cleaner
 
-[![CI](https://github.com/domehahn/housekeeping/actions/workflows/ci.yml/badge.svg)](https://github.com/domehahn/housekeeping/actions/workflows/ci.yml)
+[![CI](https://github.com/domehahn/housekeeping/actions/workflows/ci.yml/badge.svg?branch=rewrite/rust)](https://github.com/domehahn/housekeeping/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/domehahn/housekeeping?logo=github&color=blue)](https://github.com/domehahn/housekeeping/releases)
-[![Go Version](https://img.shields.io/github/go-mod/go-version/domehahn/housekeeping?logo=go)](https://go.dev)
-[![Go Report Card](https://goreportcard.com/badge/github.com/domehahn/housekeeping)](https://goreportcard.com/report/github.com/domehahn/housekeeping)
+[![Rust](https://img.shields.io/badge/rust-edition%202021-orange.svg?logo=rust)](https://www.rust-lang.org)
 [![License](https://img.shields.io/github/license/domehahn/housekeeping)](LICENSE)
 [![Security Policy](https://img.shields.io/badge/security-threat%20model-success)](docs/threat-model.md)
 
@@ -98,30 +97,18 @@ GitLab is `internal/adapters/gitlab`.
 ```bash
 git clone https://github.com/domehahn/housekeeping.git
 cd housekeeping
-make build          # -> bin/scm-cleaner
+cargo build --release    # -> target/release/scm-cleaner
+# or via make:
+make release             # -> bin/scm-cleaner
 ```
 
-Or directly from a tagged release, without cloning:
+Or install directly into your Cargo binary directory:
 
 ```bash
-go install github.com/domehahn/housekeeping/cmd/scm-cleaner@latest
-# or pin a specific version:
-go install github.com/domehahn/housekeeping/cmd/scm-cleaner@v0.2.1
+cargo install --path .
 ```
 
-This places a `scm-cleaner` binary in `$(go env GOPATH)/bin` (make sure
-that directory is on your `PATH`).
-
-Cross-compiled binaries for linux/darwin/windows (amd64+arm64) via
-`make build-all`.
-
-**Note on `scm-cleaner version` output**: both `go install` and a plain
-`go build ./...` produce a binary that reports
-`dev (commit none, built unknown)` - `pkg/version` is only stamped with a
-real version/commit/date when built with the `-ldflags` `make build`
-(or `make build-all`) already sets. This is expected, not a broken build;
-see the `LDFLAGS` variable in the `Makefile` if you want a manually
-built binary to report a specific version too.
+This places the `scm-cleaner` binary in `~/.cargo/bin` (make sure that directory is on your `PATH`).
 
 ## 5. Quick start
 
@@ -1263,32 +1250,19 @@ Go client. It:
 ## 21. Testing
 
 ```bash
-make test        # go test ./...
-make test-race    # go test -race ./...
-make coverage     # coverage.html
-make integration-test   # opt-in, see below
+cargo test            # Run all unit tests
+cargo clippy          # Run clippy linter
+cargo fmt -- --check  # Verify code formatting
+# or via make:
+make check            # fmt-check, clippy, and test
 ```
 
-- **Policy/domain tests** use `domain.FixedClock` for deterministic
+- **Policy/domain tests** use `domain::FixedClock` for deterministic
   boundary testing (e.g. exactly 30 days vs. 29 vs. 31 days ago).
-- **`internal/ciyaml` tests** are pure, no-I/O table-driven tests covering
-  the full `.gitlab-ci.yml` patch scope: default-block creation/append,
-  per-job tag append vs. jobs left alone, hidden template jobs,
-  anchors/aliases, reserved keywords, `include:` detection, and full
-  idempotency (a second call is byte-identical to the first).
-- **GitLab adapter tests** run entirely against `httptest.Server` - no
-  test in `internal/adapters/gitlab` touches the network. They cover
-  authentication headers, pagination across multiple pages, subgroup
-  recursion and de-duplication, direct-vs-admin-enriched member activity,
-  nil/unknown activity mapping, delete/remove operations,
-  401/403/404/429/500 error classification, retry-safe Merge Request
-  proposals, GitLab CI multi-document preservation, runner reach analysis,
-  live execution revalidation, and concurrent tag-change detection.
-- **Integration tests** (`test/integration/gitlab`) are skipped unless
-  `GITLAB_INTEGRATION_TEST=true`, `GITLAB_URL`, and `GITLAB_TOKEN` are all
-  set. Destructive scenarios additionally require
-  `GITLAB_INTEGRATION_ALLOW_DESTRUCTIVE=true` and are deliberately **not
-  implemented** in this suite - see the file for rationale.
+- **`ciyaml` tests** are pure, no-I/O tests covering
+  `.gitlab-ci.yml` runner tag discovery and safe AST tag replacement.
+- **GitLab adapter tests** cover authentication headers, error classification,
+  subgroup parsing, runner management, and proposal workflows.
 
 ### Tagged GitLab runners
 

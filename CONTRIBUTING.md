@@ -2,23 +2,20 @@
 
 ## Workflow
 
-1. Branch from `main`.
+1. Branch from `main` (or `rewrite/rust`).
 2. Make your change. Keep GitLab-specific code inside
-   `internal/adapters/gitlab`; keep `internal/domain` and
-   `internal/policy/*` free of provider-specific types and I/O.
+   `src/adapters/gitlab`; keep `src/domain` and
+   `src/policy` free of provider-specific types and I/O.
 3. Add or update tests. Policy/domain logic should be tested with a
-   `domain.FixedClock` and table-driven cases, never `time.Now()`. Adapter
-   changes should be tested against `httptest.Server`, never a live GitLab
-   instance.
+   `domain::FixedClock` and table-driven cases, never non-deterministic wall clock time.
 4. Run the full check suite before opening a pull request:
 
    ```bash
-   make fmt-check
-   make vet
-   make test
-   make test-race
-   make lint   # requires golangci-lint installed locally
-   make vuln-check
+   make fmt-check   # cargo fmt -- --check
+   make clippy      # cargo clippy -- -D warnings
+   make test        # cargo test
+   # or all-in-one:
+   make check
    ```
 
 5. Open a pull request describing the change and, if it affects behavior
@@ -27,22 +24,18 @@
 
 ## Design constraints (please read before large changes)
 
-- **No GitLab types outside `internal/adapters/gitlab`.** If you find
-  yourself importing `gitlab.com/gitlab-org/api/client-go` anywhere else,
-  that's a sign the abstraction needs adjusting, not that the import is
-  fine this one time.
-- **Policies are pure.** No network calls, no `time.Now()`, no logging
-  inside `internal/policy/*`. If a policy needs "now", it takes a
-  `domain.Clock`.
+- **No GitLab types outside `src/adapters/gitlab`.** If you find
+  yourself leaking provider structs into `domain` or `policy`,
+  that's a sign the abstraction needs adjusting.
+- **Policies are pure.** No network calls, no system clock calls, no logging
+  inside `src/policy`. If a policy needs "now", it takes a `&dyn Clock`.
 - **Destructive operations stay behind plan/execute.** Do not add a CLI
   command that discovers and mutates in the same invocation.
 - **Unknown is not the same as inactive.** Any new activity/attribute
   source must model "the provider didn't tell us" as
-  `domain.Unknown()`, not as a zero value that happens to look like
+  `ActivityStatus::Unknown`, not as a zero value that happens to look like
   "never happened."
-- **Small interfaces.** Add capability interfaces to `internal/provider`
-  scoped to what a use case actually needs, rather than growing a large
-  `Provider` interface.
+- **Small interfaces.** Keep provider traits scoped to what use cases actually need.
 - **Verify against current GitLab API docs.** Do not guess at field names,
   endpoint behavior, or permission requirements - check
   https://docs.gitlab.com/api/ and cite what you found in a code comment
