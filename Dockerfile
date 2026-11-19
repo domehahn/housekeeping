@@ -1,30 +1,21 @@
 # syntax=docker/dockerfile:1
 
-FROM golang:1.26-alpine AS build
+FROM rust:alpine AS build
 WORKDIR /src
 
-RUN apk add --no-cache git ca-certificates
+RUN apk add --no-cache musl-dev ca-certificates
 
-COPY go.mod go.sum ./
-RUN go mod download
+COPY Cargo.toml Cargo.lock ./
+COPY src ./src
 
-COPY . .
+RUN cargo build --release
+RUN cp target/release/scm-cleaner /usr/local/bin/scm-cleaner
 
-ARG VERSION=dev
-ARG COMMIT=none
-ARG BUILD_DATE=unknown
-RUN CGO_ENABLED=0 go build \
-    -ldflags "-s -w \
-      -X github.com/domehahn/housekeeping/pkg/version.Version=${VERSION} \
-      -X github.com/domehahn/housekeeping/pkg/version.Commit=${COMMIT} \
-      -X github.com/domehahn/housekeeping/pkg/version.BuildDate=${BUILD_DATE}" \
-    -o /out/scm-cleaner ./cmd/scm-cleaner
-
-# ---- final image: no shell, no build tools, non-root ----------------------
+# ---- final image: minimal, non-root, scratch ----------------------
 FROM scratch
 
 COPY --from=build /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
-COPY --from=build /out/scm-cleaner /usr/local/bin/scm-cleaner
+COPY --from=build /usr/local/bin/scm-cleaner /usr/local/bin/scm-cleaner
 
 USER 65532:65532
 
