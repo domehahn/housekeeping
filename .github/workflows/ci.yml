@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, rewrite/rust]
   pull_request:
     branches: [main]
 
@@ -10,81 +10,68 @@ permissions:
   contents: read
 
 jobs:
-  lint-and-check:
-    name: Code Quality & Linting
+  lint-and-format:
+    name: Code Formatting & Clippy
     runs-on: ubuntu-latest
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
 
-      - name: Set up Go
-        uses: actions/setup-go@v5
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
         with:
-          go-version-file: go.mod
-          cache: true
+          components: rustfmt, clippy
 
-      - name: Verify code formatting (gofmt)
-        run: make fmt-check
-
-      - name: Verify go.mod tidy
-        run: make tidy-check
-
-      - name: Run go vet
-        run: make vet
-
-      - name: Run golangci-lint
-        uses: golangci/golangci-lint-action@v6
+      - name: Cache Cargo dependencies
+        uses: actions/cache@v4
         with:
-          version: v1.64.5
-          args: --timeout=5m
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Check code formatting
+        run: cargo fmt -- --check
+
+      - name: Run clippy
+        run: cargo clippy -- -D warnings
 
   test:
-    name: Unit & Race Tests
+    name: Unit Tests
     runs-on: ubuntu-latest
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
 
-      - name: Set up Go
-        uses: actions/setup-go@v5
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo dependencies
+        uses: actions/cache@v4
         with:
-          go-version-file: go.mod
-          cache: true
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
 
-      - name: Run tests with race detector
-        run: make test-race
-
-      - name: Run coverage check
-        run: make coverage
-
-  security:
-    name: Vulnerability Scan
-    runs-on: ubuntu-latest
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@v4
-
-      - name: Set up Go
-        uses: actions/setup-go@v5
-        with:
-          go-version-file: go.mod
-          cache: true
-
-      - name: Run govulncheck
-        run: make vuln-check
+      - name: Run tests
+        run: cargo test --verbose
 
   build:
-    name: Cross-Platform Build Test
+    name: Release Build
     runs-on: ubuntu-latest
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
 
-      - name: Set up Go
-        uses: actions/setup-go@v5
-        with:
-          go-version-file: go.mod
-          cache: true
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
 
-      - name: Build all targets
-        run: make build-all
+      - name: Build release binary
+        run: cargo build --release

@@ -15,21 +15,16 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
 
-      - name: Set up Go
-        uses: actions/setup-go@v5
-        with:
-          go-version-file: go.mod
-          cache: true
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
 
-      - name: Install Syft for SBOM generation
-        uses: anchore/sbom-action/download-syft@v0.18.0
-
-      - name: Build release binaries, checksums, and SBOM
+      - name: Build release binary
         run: |
-          make release
+          cargo build --release
+          mkdir -p bin
+          cp target/release/scm-cleaner bin/scm-cleaner-linux-amd64
+          cd bin && sha256sum * > SHA256SUMS
 
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
@@ -37,7 +32,6 @@ jobs:
           files: |
             bin/scm-cleaner-*
             bin/SHA256SUMS
-            bin/sbom.spdx.json
           generate_release_notes: true
           draft: false
           prerelease: false
